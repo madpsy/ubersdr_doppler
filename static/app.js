@@ -684,15 +684,35 @@ function initCharts() {
         },
       },
       plugins: {
-        legend: { labels: { color: '#e6edf3', boxWidth: 12 } },
+        legend: {
+          labels: {
+            color: '#e6edf3', boxWidth: 12,
+            // Hide the min/max band datasets from the legend
+            filter: item => !item.text.endsWith(' min') && !item.text.endsWith(' max'),
+          },
+        },
         tooltip: {
+          filter: item => !item.dataset._isBand,
           callbacks: {
             title: items => items.length ? new Date(items[0].parsed.x).toISOString().slice(11, 19) + ' UTC' : '',
             label: ctx => {
-              if (state.chartMode === 'absolute') {
-                return `${ctx.dataset.label}: ${ctx.parsed.y.toFixed(3)} Hz`;
+              // Skip band datasets in tooltip
+              if (ctx.dataset._isBand) return null;
+              const pt = ctx.raw;
+              const val = state.chartMode === 'absolute'
+                ? `${ctx.parsed.y.toFixed(3)} Hz`
+                : fmtDoppler(ctx.parsed.y);
+              const lines = [`${ctx.dataset.label}: ${val}`];
+              if (pt && pt.std !== undefined && pt.std !== null) {
+                lines.push(`  σ (jitter): ±${pt.std.toFixed(3)} Hz`);
               }
-              return `${ctx.dataset.label}: ${fmtDoppler(ctx.parsed.y)}`;
+              if (pt && pt.min !== undefined && pt.max !== undefined && pt.min !== null) {
+                lines.push(`  min: ${fmtDoppler(pt.min)}  max: ${fmtDoppler(pt.max)}`);
+              }
+              if (pt && pt.count !== undefined) {
+                lines.push(`  samples: ${pt.count}`);
+              }
+              return lines;
             },
           },
         },
@@ -842,11 +862,50 @@ async function loadHistory() {
       const dopplerPoints = filtered.map(m => {
         const hz = (m.corrected_doppler_hz !== null && m.corrected_doppler_hz !== undefined)
           ? m.corrected_doppler_hz : m.doppler_hz;
-        return { x: new Date(m.timestamp), y: dopplerToY(hz, nominalHz) };
+        return {
+          x: new Date(m.timestamp),
+          y: dopplerToY(hz, nominalHz),
+          // Attach scientific stats for tooltip
+          min: m.min_doppler_hz,
+          max: m.max_doppler_hz,
+          std: m.std_dev_hz,
+          count: m.count,
+        };
       });
+      // Min/max band: lower boundary dataset (filled up to the mean line)
+      const dopplerMinPoints = filtered.map(m => ({
+        x: new Date(m.timestamp),
+        y: m.min_doppler_hz !== undefined ? dopplerToY(m.min_doppler_hz, nominalHz) : null,
+      }));
+      const dopplerMaxPoints = filtered.map(m => ({
+        x: new Date(m.timestamp),
+        y: m.max_doppler_hz !== undefined ? dopplerToY(m.max_doppler_hz, nominalHz) : null,
+      }));
+
       const snrPoints     = filtered.map(m => ({ x: new Date(m.timestamp), y: m.snr_db }));
       const powerPoints   = filtered.map(m => ({ x: new Date(m.timestamp), y: m.signal_dbfs }));
 
+      // Push min band (lower boundary), then max band (upper boundary, fills down to min)
+      const dMinIdx = state.dopplerChart.data.datasets.length;
+      state.dopplerChart.data.datasets.push({
+        label: label + ' min',
+        data: dopplerMinPoints,
+        borderColor: 'transparent',
+        backgroundColor: colour + '22',
+        borderWidth: 0, pointRadius: 0, tension: 0.15, spanGaps: false,
+        fill: '+1', // fill between this dataset and the next (max)
+        _isBand: true,
+      });
+      const dMaxIdx = state.dopplerChart.data.datasets.length;
+      state.dopplerChart.data.datasets.push({
+        label: label + ' max',
+        data: dopplerMaxPoints,
+        borderColor: 'transparent',
+        backgroundColor: colour + '22',
+        borderWidth: 0, pointRadius: 0, tension: 0.15, spanGaps: false,
+        fill: false,
+        _isBand: true,
+      });
       const dIdx = state.dopplerChart.data.datasets.length;
       state.dopplerChart.data.datasets.push({
         label, data: dopplerPoints,
@@ -868,7 +927,7 @@ async function loadHistory() {
         borderWidth: 1, pointRadius: 0, tension: 0.15, spanGaps: false,
       });
 
-      state.chartDatasets[label] = { doppler: dIdx, snr: sIdx, power: pIdx };
+      state.chartDatasets[label] = { doppler: dIdx, dMin: dMinIdx, dMax: dMaxIdx, snr: sIdx, power: pIdx };
     } catch (e) {
       console.warn('history load failed for', label, e);
     }
@@ -891,41 +950,62 @@ function appendLivePoint(label, reading) {
   const ts = new Date(reading.timestamp);
 
   if (state.chartDatasets[label] === undefined) {
+    // Create min band, max band, then mean line (same order as loadHistory)
+    const dMinIdx = state.dopplerChart.data.datasets.length;
+    state.dopplerChart.data.datasets.push({
+      label: label + ' min', data: [], borderColor: 'transparent',
+      backgroundColor: colour + '22', borderWidth: 0, pointRadius: 0,
+      tension: 0.15, spanGaps: false, fill: '+1', _isBand: true,
+    });
+    const dMaxIdx = state.dopplerChart.data.datasets.length;
+    state.dopplerChart.data.datasets.push({
+      label: label + ' max', data: [], borderColor: 'transparent',
+      backgroundColor: colour + '22', borderWidth: 0, pointRadius: 0,
+      tension: 0.15, spanGaps: false, fill: false, _isBand: true,
+    });
     const dIdx = state.dopplerChart.data.datasets.length;
-    const sIdx = state.snrChart.data.datasets.length;
-    const pIdx = state.powerChart.data.datasets.length;
     state.dopplerChart.data.datasets.push({
       label, data: [], borderColor: colour, backgroundColor: 'transparent',
       borderWidth: 1.5, pointRadius: 0, tension: 0.15, spanGaps: false,
     });
+    const sIdx = state.snrChart.data.datasets.length;
     state.snrChart.data.datasets.push({
       label, data: [], borderColor: colour, backgroundColor: colour + '22',
       fill: true, borderWidth: 1, pointRadius: 0, tension: 0.15, spanGaps: false,
     });
+    const pIdx = state.powerChart.data.datasets.length;
     state.powerChart.data.datasets.push({
       label, data: [], borderColor: colour, backgroundColor: colour + '22',
       fill: true, borderWidth: 1, pointRadius: 0, tension: 0.15, spanGaps: false,
     });
-    state.chartDatasets[label] = { doppler: dIdx, snr: sIdx, power: pIdx };
+    state.chartDatasets[label] = { doppler: dIdx, dMin: dMinIdx, dMax: dMaxIdx, snr: sIdx, power: pIdx };
   }
 
-  const { doppler: dIdx, snr: sIdx, power: pIdx } = state.chartDatasets[label];
-  const dDs = state.dopplerChart.data.datasets[dIdx];
-  const sDs = state.snrChart.data.datasets[sIdx];
-  const pDs = state.powerChart.data.datasets[pIdx];
+  const { doppler: dIdx, dMin: dMinIdx, dMax: dMaxIdx, snr: sIdx, power: pIdx } = state.chartDatasets[label];
+  const dDs    = state.dopplerChart.data.datasets[dIdx];
+  const dMinDs = dMinIdx !== undefined ? state.dopplerChart.data.datasets[dMinIdx] : null;
+  const dMaxDs = dMaxIdx !== undefined ? state.dopplerChart.data.datasets[dMaxIdx] : null;
+  const sDs    = state.snrChart.data.datasets[sIdx];
+  const pDs    = state.powerChart.data.datasets[pIdx];
 
   // Use corrected Doppler when available (reference station offset applied)
   const dHz = (reading.corrected_doppler_hz !== null && reading.corrected_doppler_hz !== undefined)
     ? reading.corrected_doppler_hz : reading.doppler_hz;
   const yVal = reading.valid ? dopplerToY(dHz, nominalHz) : null;
+  // Live 1-second readings don't have min/max/std — those are minute-mean stats
   dDs.data.push({ x: ts, y: yVal });
+  if (dMinDs) dMinDs.data.push({ x: ts, y: yVal }); // live: band collapses to mean line
+  if (dMaxDs) dMaxDs.data.push({ x: ts, y: yVal });
   sDs.data.push({ x: ts, y: reading.valid ? reading.snr_db : null });
   pDs.data.push({ x: ts, y: reading.valid ? reading.signal_dbfs : null });
 
   const trimDs = ds => {
     while (ds.data.length > 0 && ds.data[0].x.getTime() < cutoff) ds.data.shift();
   };
-  trimDs(dDs); trimDs(sDs); trimDs(pDs);
+  trimDs(dDs);
+  if (dMinDs) trimDs(dMinDs);
+  if (dMaxDs) trimDs(dMaxDs);
+  trimDs(sDs); trimDs(pDs);
 
   state.dopplerChart.update('none');
   state.snrChart.update('none');
@@ -991,6 +1071,11 @@ function connectSSE() {
         const s = state.stations.find(x => x.config && x.config.label === station);
         if (s) {
           s.current = reading;
+          // Keep corrected_doppler_hz on the station object in sync with the live reading
+          // so the status table column updates every second (not just on /api/stations polls)
+          if (reading.corrected_doppler_hz !== undefined) {
+            s.corrected_doppler_hz = reading.corrected_doppler_hz;
+          }
           renderStatusTable();
           // Redraw mini spectrum with current reading info (uses cached spectrum_data)
           const i = state.stations.indexOf(s);

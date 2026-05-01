@@ -55,6 +55,9 @@ type MinuteMean struct {
 	Timestamp          time.Time `json:"timestamp"`
 	DopplerHz          float64   `json:"doppler_hz"`
 	CorrectedDopplerHz *float64  `json:"corrected_doppler_hz,omitempty"` // nil if no reference station
+	MinDopplerHz       float64   `json:"min_doppler_hz"`                 // minimum raw Doppler in the minute
+	MaxDopplerHz       float64   `json:"max_doppler_hz"`                 // maximum raw Doppler in the minute
+	StdDevHz           float64   `json:"std_dev_hz"`                     // standard deviation of raw Doppler (jitter)
 	SNR                float32   `json:"snr_db"`
 	SignalDBFS         float32   `json:"signal_dbfs"`
 	NoiseDBFS          float32   `json:"noise_dbfs"`
@@ -946,11 +949,19 @@ func (ds *DopplerStation) aggregateMinute() {
 	var sumDoppler, sumCorrected float64
 	var sumSNR, sumSig, sumNoise float32
 	correctedCount := 0
+	minHz := samples[0].DopplerHz
+	maxHz := samples[0].DopplerHz
 	for _, s := range samples {
 		sumDoppler += s.DopplerHz
 		sumSNR += s.SNR
 		sumSig += s.SignalDBFS
 		sumNoise += s.NoiseDBFS
+		if s.DopplerHz < minHz {
+			minHz = s.DopplerHz
+		}
+		if s.DopplerHz > maxHz {
+			maxHz = s.DopplerHz
+		}
 		// Each 1-second reading already has the per-sample correction applied
 		if s.CorrectedDopplerHz != nil {
 			sumCorrected += *s.CorrectedDopplerHz
@@ -958,13 +969,29 @@ func (ds *DopplerStation) aggregateMinute() {
 		}
 	}
 	n := float64(len(samples))
+	meanDoppler := sumDoppler / n
+
+	// Compute standard deviation (jitter) of raw Doppler
+	var sumSqDiff float64
+	for _, s := range samples {
+		d := s.DopplerHz - meanDoppler
+		sumSqDiff += d * d
+	}
+	stdDev := 0.0
+	if n > 1 {
+		stdDev = math.Sqrt(sumSqDiff / (n - 1)) // sample std dev
+	}
+
 	mean := MinuteMean{
-		Timestamp:  time.Now().UTC(),
-		DopplerHz:  sumDoppler / n,
-		SNR:        sumSNR / float32(n),
-		SignalDBFS: sumSig / float32(n),
-		NoiseDBFS:  sumNoise / float32(n),
-		Count:      len(samples),
+		Timestamp:    time.Now().UTC(),
+		DopplerHz:    meanDoppler,
+		MinDopplerHz: minHz,
+		MaxDopplerHz: maxHz,
+		StdDevHz:     stdDev,
+		SNR:          sumSNR / float32(n),
+		SignalDBFS:   sumSig / float32(n),
+		NoiseDBFS:    sumNoise / float32(n),
+		Count:        len(samples),
 	}
 
 	// Use per-sample corrected mean if we have enough corrected samples,
