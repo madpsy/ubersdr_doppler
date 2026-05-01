@@ -38,38 +38,47 @@ const state = {
 // Audio preview
 // ---------------------------------------------------------------------------
 window.toggleAudioPreview = function(label) {
+  // Helper: fully stop and release an audio element, aborting the HTTP stream.
+  function stopAudio(el) {
+    if (!el) return;
+    el.onended = null;
+    el.onerror = null;
+    el.pause();
+    el.src = '';
+    el.load(); // forces browser to abort the streaming HTTP request
+  }
+
   if (state.audioPlaying === label) {
     // Stop current preview
-    if (state.audioElement) {
-      state.audioElement.pause();
-      state.audioElement.src = '';
-      state.audioElement = null;
-    }
+    stopAudio(state.audioElement);
+    state.audioElement = null;
     state.audioPlaying = null;
     renderStatusTable();
     return;
   }
 
-  // Stop any existing preview
-  if (state.audioElement) {
-    state.audioElement.pause();
-    state.audioElement.src = '';
-    state.audioElement = null;
-  }
+  // Stop any existing preview before starting a new one
+  stopAudio(state.audioElement);
+  state.audioElement = null;
+  state.audioPlaying = null;
 
   // Start new preview
   const audio = new Audio(`${BASE}/api/audio/preview?station=${encodeURIComponent(label)}`);
   audio.play().catch(e => console.warn('audio preview failed:', e));
   audio.onended = () => {
-    state.audioPlaying = null;
-    state.audioElement = null;
-    renderStatusTable();
+    if (state.audioElement === audio) {
+      state.audioPlaying = null;
+      state.audioElement = null;
+      renderStatusTable();
+    }
   };
   audio.onerror = () => {
-    console.warn('audio preview error for', label);
-    state.audioPlaying = null;
-    state.audioElement = null;
-    renderStatusTable();
+    if (state.audioElement === audio) {
+      console.warn('audio preview error for', label);
+      state.audioPlaying = null;
+      state.audioElement = null;
+      renderStatusTable();
+    }
   };
   state.audioPlaying = label;
   state.audioElement = audio;
