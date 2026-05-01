@@ -713,10 +713,18 @@ function connectSSE() {
   setConnStatus('connecting');
   const es = new EventSource(BASE + '/api/events');
 
-  // Named events from the server
+  // Named events from the server — set connected on any of these
   es.addEventListener('connected',  () => setConnStatus('connected'));
   es.addEventListener('heartbeat',  () => setConnStatus('connected'));
   es.onopen = () => setConnStatus('connected');
+
+  // Fallback: if the proxy buffers the initial 'connected' event,
+  // set connected after a short delay if the connection is open.
+  setTimeout(() => {
+    if (es.readyState === EventSource.OPEN) {
+      setConnStatus('connected');
+    }
+  }, 3000);
 
   // Throttle spectrum refresh — at most once per 2 seconds
   let spectrumRefreshPending = false;
