@@ -1350,6 +1350,26 @@ function startStalenessTicker() {
 }
 
 // ---------------------------------------------------------------------------
+// History refresh ticker — re-fetches minute-mean history from the backend
+// every 60 s so the chart gains jitter / min / max band data as each new
+// minute-mean is committed.  Only runs in live (rolling-window) mode; when
+// the user has selected a specific date we leave the chart alone.
+// ---------------------------------------------------------------------------
+function startHistoryRefreshTicker() {
+  setInterval(async () => {
+    // Skip if the user is viewing a specific historical date — the data
+    // won't change and we don't want to clobber their view.
+    if (state.chartDate !== '') return;
+    if (state.stations.length === 0) return;
+    try {
+      await loadHistory();
+    } catch (e) {
+      console.warn('periodic history refresh failed:', e);
+    }
+  }, 60 * 1000);
+}
+
+// ---------------------------------------------------------------------------
 // Chart.js plugin — "signal lost" gap annotations
 //
 // Scans the primary Doppler dataset for each station and draws a semi-
@@ -1456,6 +1476,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   initCharts();
   startSpecRenderLoop();
   startStalenessTicker();
+  startHistoryRefreshTicker();
   await checkAuthStatus();
   await loadSettings();
   await loadStations();
