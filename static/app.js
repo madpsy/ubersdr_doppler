@@ -7,6 +7,11 @@
  */
 'use strict';
 
+// BASE_PATH is injected by the Go server from the X-Forwarded-Prefix header.
+// When served via UberSDR's addon proxy at /addon/doppler/, this will be
+// "/addon/doppler" so all API calls are correctly prefixed.
+const BASE = (window.BASE_PATH || '').replace(/\/$/, '');
+
 // ---------------------------------------------------------------------------
 // State
 // ---------------------------------------------------------------------------
@@ -152,7 +157,7 @@ function hasReference() {
 }
 
 async function apiFetch(path, opts = {}) {
-  const r = await fetch(path, opts);
+  const r = await fetch(BASE + path, opts);
   if (!r.ok) throw new Error(await r.text());
   return r;
 }
@@ -537,7 +542,7 @@ function appendLivePoint(label, reading) {
 // ---------------------------------------------------------------------------
 function connectSSE() {
   setConnStatus('connecting');
-  const es = new EventSource('/api/events');
+  const es = new EventSource(BASE + '/api/events');
 
   es.onopen = () => setConnStatus('connected');
 
@@ -846,7 +851,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     const station = document.getElementById('dl-station').value;
     const date    = document.getElementById('dl-date').value;
     if (!station || !date) { alert('Select a station and date.'); return; }
-    window.location.href = `/api/csv?station=${encodeURIComponent(station)}&date=${date}`;
+    window.location.href = `${BASE}/api/csv?station=${encodeURIComponent(station)}&date=${date}`;
   });
 
   // Default download date to today (UTC)

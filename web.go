@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"text/template"
 	"time"
 )
 
@@ -147,12 +148,41 @@ func startHTTPServer(
 	sessions := newSessionStore()
 	mux := http.NewServeMux()
 
-	// Static files (embedded).
+	// index.html served as a Go template so BASE_PATH can be injected.
+	// BASE_PATH is read from the X-Forwarded-Prefix header set by UberSDR's
+	// addon proxy (strip_prefix: true sends this header).
+	indexTmpl, indexTmplErr := func() (*template.Template, error) {
+		data, err := staticFiles.ReadFile("static/index.html")
+		if err != nil {
+			return nil, err
+		}
+		return template.New("index").Parse(string(data))
+	}()
+
+	basePath := func(r *http.Request) string {
+		return strings.TrimRight(r.Header.Get("X-Forwarded-Prefix"), "/")
+	}
+
+	// Static files (embedded) — all except index.html.
 	sub, err := fs.Sub(staticFiles, "static")
 	if err != nil {
 		return fmt.Errorf("embed sub: %w", err)
 	}
-	mux.Handle("/", http.FileServer(http.FS(sub)))
+	staticHandler := http.FileServer(http.FS(sub))
+
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/" || r.URL.Path == "/index.html" {
+			if indexTmplErr != nil {
+				http.Error(w, "template error: "+indexTmplErr.Error(), http.StatusInternalServerError)
+				return
+			}
+			bp := basePath(r)
+			w.Header().Set("Content-Type", "text/html; charset=utf-8")
+			indexTmpl.Execute(w, map[string]string{"BasePath": bp}) //nolint:errcheck
+			return
+		}
+		staticHandler.ServeHTTP(w, r)
+	})
 
 	// ── Auth endpoints ─────────────────────────────────────────────────────
 	// GET /api/auth/status
