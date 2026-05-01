@@ -266,11 +266,11 @@ type DopplerStation struct {
 	streamSampleRate int
 
 	// Measurement state — protected by mu.
-	mu          sync.RWMutex
-	current     DopplerReading
-	history     []MinuteMean
-	latestBins  []float32 // latest unwrapped spectrum bins for display
-	latestPeak  int       // peak bin index in latestBins (-1 if no valid signal)
+	mu         sync.RWMutex
+	current    DopplerReading
+	history    []MinuteMean
+	latestBins []float32 // latest unwrapped spectrum bins for display
+	latestPeak int       // peak bin index in latestBins (-1 if no valid signal)
 
 	// 1-second sample accumulator for minute-mean calculation.
 	sampleMu sync.Mutex
@@ -290,9 +290,9 @@ func newDopplerStation(cfg stationConfig, ubersdrURL string, hub *sseHub, cw *cs
 	}
 }
 
-// wsBaseURL converts the UberSDR WebSocket URL to an HTTP base URL.
-func wsBaseURL(wsURL string) string {
-	u, _ := url.Parse(wsURL)
+// httpBaseURL converts any UberSDR URL (ws/wss/http/https) to an HTTP base URL.
+func httpBaseURL(rawURL string) string {
+	u, _ := url.Parse(rawURL)
 	scheme := u.Scheme
 	switch scheme {
 	case "ws":
@@ -301,14 +301,34 @@ func wsBaseURL(wsURL string) string {
 		scheme = "https"
 	}
 	path := strings.TrimRight(u.Path, "/")
-	if path == "/ws" || path == "" {
+	// Strip a bare "/ws" path — the base URL should not include it.
+	if path == "/ws" {
 		path = ""
 	}
 	return fmt.Sprintf("%s://%s%s", scheme, u.Host, path)
 }
 
-// wsURL builds a WebSocket URL for the given parameters.
-func (ds *DopplerStation) wsURL(mode string, extraParams url.Values) string {
+// spectrumWSURL builds the WebSocket URL for the /ws/user-spectrum endpoint.
+// The server only accepts user_session_id as a query parameter; all other
+// spectrum parameters (frequency, bin_count, bin_bandwidth) are sent as JSON
+// messages after the connection is established.
+func (ds *DopplerStation) spectrumWSURL(sessionID string) string {
+	u, _ := url.Parse(ds.ubersdrURL)
+	wsScheme := "ws"
+	if u.Scheme == "https" || u.Scheme == "wss" {
+		wsScheme = "wss"
+	}
+	// Strip any existing path suffix so we always hit /ws/user-spectrum.
+	host := u.Host
+	q := url.Values{}
+	q.Set("user_session_id", sessionID)
+	return fmt.Sprintf("%s://%s/ws/user-spectrum?%s", wsScheme, host, q.Encode())
+}
+
+// audioWSURL builds the WebSocket URL for the /ws audio endpoint.
+// dialFreqHz overrides the frequency used in the URL; pass 0 to use the
+// station's nominal carrier frequency.
+func (ds *DopplerStation) audioWSURL(mode string, extraParams url.Values, sessionID string, dialFreqHz int) string {
 	u, _ := url.Parse(ds.ubersdrURL)
 	wsScheme := "ws"
 	if u.Scheme == "https" || u.Scheme == "wss" {
@@ -318,10 +338,14 @@ func (ds *DopplerStation) wsURL(mode string, extraParams url.Values) string {
 	if path == "" {
 		path = "/ws"
 	}
+	freq := ds.cfg.FreqHz
+	if dialFreqHz > 0 {
+		freq = dialFreqHz
+	}
 	q := url.Values{}
-	q.Set("frequency", fmt.Sprintf("%d", ds.cfg.FreqHz))
+	q.Set("frequency", fmt.Sprintf("%d", freq))
 	q.Set("mode", mode)
-	q.Set("user_session_id", uuid.New().String())
+	q.Set("user_session_id", sessionID)
 	for k, vs := range extraParams {
 		for _, v := range vs {
 			q.Set(k, v)
@@ -330,20 +354,34 @@ func (ds *DopplerStation) wsURL(mode string, extraParams url.Values) string {
 	return fmt.Sprintf("%s://%s%s?%s", wsScheme, u.Host, path, q.Encode())
 }
 
-// checkConnection registers a session with UberSDR.
+// checkConnection registers a session with UberSDR's /connection endpoint.
+// A non-empty User-Agent header is required: the server stores it and later
+// checks that it is present before allowing the WebSocket upgrade.
 func (ds *DopplerStation) checkConnection(sessionID string) error {
-	base := wsBaseURL(ds.ubersdrURL)
+	base := httpBaseURL(ds.ubersdrURL)
 	endpoint := base + "/connection"
 	body := fmt.Sprintf(`{"user_session_id":"%s"}`, sessionID)
-	resp, err := http.Post(endpoint, "application/json", bytes.NewBufferString(body))
+	req, err := http.NewRequest(http.MethodPost, endpoint, bytes.NewBufferString(body))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("User-Agent", "ubersdr_doppler/1.0")
+	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		return err
 	}
 	resp.Body.Close()
-	if resp.StatusCode == http.StatusForbidden {
-		return fmt.Errorf("connection rejected (password required?)")
+	switch resp.StatusCode {
+	case http.StatusOK:
+		return nil
+	case http.StatusForbidden:
+		return fmt.Errorf("connection rejected (password required or IP banned)")
+	case http.StatusServiceUnavailable:
+		return fmt.Errorf("connection rejected (server full)")
+	default:
+		return fmt.Errorf("connection check returned HTTP %d", resp.StatusCode)
 	}
-	return nil
 }
 
 // run starts both the spectrum measurement loop and the audio loop.
@@ -410,11 +448,7 @@ func (ds *DopplerStation) runSpectrumLoop(ctx context.Context) {
 				continue
 			}
 
-			specParams := url.Values{}
-			specParams.Set("bin_count", fmt.Sprintf("%d", specBinCount))
-			specParams.Set("bin_bandwidth", fmt.Sprintf("%.1f", specBinBandwidth))
-			specParams.Set("user_session_id", sessionID)
-			wsAddr := ds.wsURL("spectrum", specParams)
+			wsAddr := ds.spectrumWSURL(sessionID)
 
 			hdr := http.Header{}
 			hdr.Set("User-Agent", "ubersdr_doppler/1.0")
@@ -435,6 +469,24 @@ func (ds *DopplerStation) runSpectrumLoop(ctx context.Context) {
 
 			log.Printf("[%s] spectrum connected", ds.cfg.Label)
 
+			// Send zoom/pan config to request our desired window:
+			// 500 bins × 2 Hz = 1 kHz centred on the carrier frequency.
+			// The server ignores unknown fields so this is safe to send immediately.
+			if err := conn.WriteJSON(map[string]interface{}{
+				"type":         "zoom",
+				"frequency":    ds.cfg.FreqHz,
+				"binBandwidth": specBinBandwidth,
+			}); err != nil {
+				log.Printf("[%s] spectrum: failed to send zoom config: %v — reconnecting", ds.cfg.Label, err)
+				conn.Close()
+				time.Sleep(5 * time.Second)
+				select {
+				case connCh <- struct{}{}:
+				default:
+				}
+				continue
+			}
+
 			// Keepalive
 			localCtx, localCancel := context.WithCancel(ctx)
 			go func() {
@@ -452,19 +504,25 @@ func (ds *DopplerStation) runSpectrumLoop(ctx context.Context) {
 				}
 			}()
 
-			// Read loop
+			// Read loop — the server sends:
+			//   • text JSON frames: "config" (session params), "pong", "error" — skip these
+			//   • binary SPEC frames: spectrum data — decode with dec.decode()
 			for {
 				if ctx.Err() != nil {
 					localCancel()
 					conn.Close()
 					return
 				}
-				_, msg, err := conn.ReadMessage()
+				msgType, msg, err := conn.ReadMessage()
 				if err != nil {
 					localCancel()
 					conn.Close()
 					log.Printf("[%s] spectrum: read error: %v — reconnecting", ds.cfg.Label, err)
 					break
+				}
+				// Skip text (JSON) control messages from the server.
+				if msgType != websocket.BinaryMessage {
+					continue
 				}
 				bins, ok := dec.decode(msg)
 				if !ok {
@@ -574,11 +632,14 @@ func (ds *DopplerStation) runAudioLoop(ctx context.Context) {
 		audioParams := url.Values{}
 		audioParams.Set("format", "pcm-zstd")
 		audioParams.Set("version", "2")
-		audioParams.Set("user_session_id", sessionID)
-		// Narrow AM filter centred on carrier
-		audioParams.Set("bandwidthLow", "-600")
-		audioParams.Set("bandwidthHigh", "600")
-		wsAddr := ds.wsURL("am", audioParams)
+		// USB mode with dial 1 kHz below the carrier so the carrier tone
+		// appears at 1000 Hz in the audio passband (standard practice).
+		// Filter: 300–1500 Hz passband centred on the 1 kHz tone.
+		audioParams.Set("bandwidthLow", "300")
+		audioParams.Set("bandwidthHigh", "1500")
+		// Dial frequency = carrier - 1000 Hz
+		dialFreq := ds.cfg.FreqHz - 1000
+		wsAddr := ds.audioWSURL("usb", audioParams, sessionID, dialFreq)
 
 		hdr := http.Header{}
 		hdr.Set("User-Agent", "ubersdr_doppler/1.0")
@@ -687,7 +748,7 @@ func detectDoppler(bins []float32, carrierHz int, binBandwidth, minSNR, maxDrift
 			SNR:        snr,
 			SignalDBFS: peakPower,
 			NoiseDBFS:  noiseFloor,
-			Valid:       false,
+			Valid:      false,
 		}
 	}
 
@@ -704,7 +765,7 @@ func detectDoppler(bins []float32, carrierHz int, binBandwidth, minSNR, maxDrift
 		SNR:        snr,
 		SignalDBFS: peakPower,
 		NoiseDBFS:  noiseFloor,
-		Valid:       true,
+		Valid:      true,
 	}
 }
 
@@ -745,7 +806,7 @@ func detectDopplerWithPeak(bins []float32, carrierHz int, binBandwidth, minSNR, 
 		SNR:        snr,
 		SignalDBFS: peakPower,
 		NoiseDBFS:  noiseFloor,
-		Valid:       true,
+		Valid:      true,
 	}, peakBin
 }
 

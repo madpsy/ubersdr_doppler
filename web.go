@@ -60,11 +60,11 @@ func (s *sessionStore) valid(tok string) bool {
 const sessionCookieName = "ui_session"
 
 // requiresAuth checks that the request carries a valid session cookie.
-// If uiPassword is empty, write actions are disabled entirely.
+// If uiPassword is empty, the UI is open/unprotected and all write actions are allowed.
 func requiresAuth(w http.ResponseWriter, r *http.Request, uiPassword string, sessions *sessionStore) bool {
 	if uiPassword == "" {
-		http.Error(w, `{"error":"write actions are disabled — set UI_PASSWORD to enable them"}`, http.StatusForbidden)
-		return false
+		// No password configured — open access, allow all writes.
+		return true
 	}
 	cookie, err := r.Cookie(sessionCookieName)
 	if err != nil || !sessions.valid(cookie.Value) {
@@ -110,7 +110,7 @@ func (h *sseHub) unsubscribe(c *sseClient) {
 // broadcast sends a live reading to all subscribed SSE clients.
 func (h *sseHub) broadcast(label string, r DopplerReading) {
 	type payload struct {
-		Station string        `json:"station"`
+		Station string         `json:"station"`
 		Reading DopplerReading `json:"reading"`
 	}
 	data, err := json.Marshal(payload{Station: label, Reading: r})
