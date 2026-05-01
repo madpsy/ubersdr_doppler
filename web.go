@@ -411,32 +411,29 @@ func startHTTPServer(
 			return
 		}
 		// Optional date filter: ?date=YYYY-MM-DD (UTC day)
+		// When present, read directly from the per-date history file on disk.
+		// When absent, return the in-memory rolling 24h window.
 		dateStr := r.URL.Query().Get("date")
-		var filterDate time.Time
-		if dateStr != "" {
-			var err error
-			filterDate, err = time.ParseInLocation("2006-01-02", dateStr, time.UTC)
-			if err != nil {
-				http.Error(w, "invalid date format (expected YYYY-MM-DD)", http.StatusBadRequest)
-				return
-			}
-		}
 		for _, ds := range mgr.list() {
-			if ds.cfg.Label == label {
-				history := ds.History()
-				if !filterDate.IsZero() {
-					dayEnd := filterDate.Add(24 * time.Hour)
-					filtered := history[:0]
-					for _, m := range history {
-						if !m.Timestamp.Before(filterDate) && m.Timestamp.Before(dayEnd) {
-							filtered = append(filtered, m)
-						}
-					}
-					history = filtered
+			if ds.cfg.Label != label {
+				continue
+			}
+			if dateStr != "" {
+				filterDate, err := time.ParseInLocation("2006-01-02", dateStr, time.UTC)
+				if err != nil {
+					http.Error(w, "invalid date format (expected YYYY-MM-DD)", http.StatusBadRequest)
+					return
+				}
+				// Read from the per-date disk file — may be any historical day
+				history := ds.HistoryForDate(filterDate)
+				if history == nil {
+					history = []MinuteMean{} // return empty array, not null
 				}
 				jsonResponse(w, history)
-				return
+			} else {
+				jsonResponse(w, ds.History())
 			}
+			return
 		}
 		http.Error(w, "station not found", http.StatusNotFound)
 	})

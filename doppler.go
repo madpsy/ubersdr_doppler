@@ -258,10 +258,11 @@ const (
 type DopplerStation struct {
 	cfg stationConfig
 
-	ubersdrURL  string
-	historyPath string // path to the per-station history JSON file (empty = no persistence)
-	minSNR      float64
-	maxDriftHz  float64
+	ubersdrURL       string
+	historyDataDir   string // base data directory for per-date history files (empty = no persistence)
+	historySafeLabel string // sanitised label safe for use in filenames
+	minSNR           float64
+	maxDriftHz       float64
 
 	hub       *sseHub
 	csvWriter *csvWriter
@@ -302,76 +303,141 @@ type DopplerStation struct {
 // newDopplerStation creates a DopplerStation from a stationConfig.
 // dataDir is the data directory for history persistence; pass "" to disable.
 func newDopplerStation(cfg stationConfig, ubersdrURL, dataDir string, hub *sseHub, cw *csvWriter) *DopplerStation {
-	histPath := ""
+	safe := ""
 	if dataDir != "" {
 		// Sanitise label for use as a filename component
-		safe := strings.Map(func(r rune) rune {
+		safe = strings.Map(func(r rune) rune {
 			if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '-' || r == '_' {
 				return r
 			}
 			return '_'
 		}, cfg.Label)
-		histPath = dataDir + "/history-" + safe + ".json"
 	}
 	return &DopplerStation{
-		cfg:         cfg,
-		ubersdrURL:  ubersdrURL,
-		historyPath: histPath,
-		minSNR:      cfg.MinSNR,
-		maxDriftHz:  cfg.MaxDriftHz,
-		hub:         hub,
-		csvWriter:   cw,
-		audioHub:    newAudioBroadcastHub(),
+		cfg:              cfg,
+		ubersdrURL:       ubersdrURL,
+		historyDataDir:   dataDir,
+		historySafeLabel: safe,
+		minSNR:           cfg.MinSNR,
+		maxDriftHz:       cfg.MaxDriftHz,
+		hub:              hub,
+		csvWriter:        cw,
+		audioHub:         newAudioBroadcastHub(),
 	}
 }
 
-// saveHistory writes the current history slice to disk atomically.
-// Must be called with ds.mu held (read or write).
+// historyDayPath returns the path to the history JSON file for a given UTC day.
+// Format: <dataDir>/YYYY/MM/DD/history-<label>.json
+func (ds *DopplerStation) historyDayPath(t time.Time) string {
+	if ds.historyDataDir == "" || ds.historySafeLabel == "" {
+		return ""
+	}
+	d := t.UTC()
+	return fmt.Sprintf("%s/%04d/%02d/%02d/history-%s.json",
+		ds.historyDataDir, d.Year(), d.Month(), d.Day(), ds.historySafeLabel)
+}
+
+// HistoryForDate reads the history JSON file for a specific UTC day from disk.
+// Returns nil if the file doesn't exist or can't be parsed.
+func (ds *DopplerStation) HistoryForDate(date time.Time) []MinuteMean {
+	path := ds.historyDayPath(date)
+	if path == "" {
+		return nil
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if !os.IsNotExist(err) {
+			log.Printf("[%s] history: read %s: %v", ds.cfg.Label, path, err)
+		}
+		return nil
+	}
+	var h []MinuteMean
+	if err := json.Unmarshal(data, &h); err != nil {
+		log.Printf("[%s] history: parse %s: %v", ds.cfg.Label, path, err)
+		return nil
+	}
+	return h
+}
+
+// saveHistory rewrites today's history day-file with all entries for today.
+// Must be called with ds.mu held.
 func (ds *DopplerStation) saveHistory() {
-	if ds.historyPath == "" {
+	if ds.historyDataDir == "" || len(ds.history) == 0 {
 		return
 	}
-	data, err := json.Marshal(ds.history)
+	// Determine today's UTC date from the last entry
+	today := ds.history[len(ds.history)-1].Timestamp.UTC()
+	path := ds.historyDayPath(today)
+	if path == "" {
+		return
+	}
+	// Collect only today's entries
+	dayStart := time.Date(today.Year(), today.Month(), today.Day(), 0, 0, 0, 0, time.UTC)
+	dayEnd := dayStart.Add(24 * time.Hour)
+	var todayEntries []MinuteMean
+	for _, m := range ds.history {
+		if !m.Timestamp.Before(dayStart) && m.Timestamp.Before(dayEnd) {
+			todayEntries = append(todayEntries, m)
+		}
+	}
+	if len(todayEntries) == 0 {
+		return
+	}
+	// Ensure directory exists
+	dir := fmt.Sprintf("%s/%04d/%02d/%02d",
+		ds.historyDataDir, today.Year(), today.Month(), today.Day())
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		log.Printf("[%s] history: mkdir %s: %v", ds.cfg.Label, dir, err)
+		return
+	}
+	data, err := json.Marshal(todayEntries)
 	if err != nil {
 		log.Printf("[%s] history: marshal error: %v", ds.cfg.Label, err)
 		return
 	}
-	tmp := ds.historyPath + ".tmp"
+	tmp := path + ".tmp"
 	if err := os.WriteFile(tmp, data, 0o644); err != nil {
 		log.Printf("[%s] history: write error: %v", ds.cfg.Label, err)
 		return
 	}
-	if err := os.Rename(tmp, ds.historyPath); err != nil {
+	if err := os.Rename(tmp, path); err != nil {
 		log.Printf("[%s] history: rename error: %v", ds.cfg.Label, err)
 	}
 }
 
-// loadHistoryFromDisk reads the history file and populates ds.history.
+// loadHistoryFromDisk loads the last 24 hours of history from per-date JSON files.
+// Reads today's and yesterday's files to cover the rolling 24h window.
 // Safe to call before the station goroutine starts.
 func (ds *DopplerStation) loadHistoryFromDisk() {
-	if ds.historyPath == "" {
+	if ds.historyDataDir == "" {
 		return
 	}
-	data, err := os.ReadFile(ds.historyPath)
-	if err != nil {
-		if !os.IsNotExist(err) {
-			log.Printf("[%s] history: read error: %v", ds.cfg.Label, err)
+	now := time.Now().UTC()
+	cutoff := now.Add(-time.Duration(historyDepth) * time.Minute)
+
+	var combined []MinuteMean
+	// Load yesterday and today to cover the 24h window across midnight
+	for _, d := range []time.Time{now.Add(-24 * time.Hour), now} {
+		entries := ds.HistoryForDate(d)
+		combined = append(combined, entries...)
+	}
+	// Filter to the rolling window and deduplicate by timestamp
+	seen := make(map[time.Time]bool)
+	var filtered []MinuteMean
+	for _, m := range combined {
+		if m.Timestamp.Before(cutoff) || seen[m.Timestamp] {
+			continue
 		}
-		return
+		seen[m.Timestamp] = true
+		filtered = append(filtered, m)
 	}
-	var h []MinuteMean
-	if err := json.Unmarshal(data, &h); err != nil {
-		log.Printf("[%s] history: parse error: %v", ds.cfg.Label, err)
+	if len(filtered) == 0 {
 		return
-	}
-	// Trim to historyDepth in case the file is older/larger
-	if len(h) > historyDepth {
-		h = h[len(h)-historyDepth:]
 	}
 	ds.mu.Lock()
-	ds.history = h
+	ds.history = filtered
 	ds.mu.Unlock()
-	log.Printf("[%s] history: loaded %d minute-means from disk", ds.cfg.Label, len(h))
+	log.Printf("[%s] history: loaded %d minute-means from disk", ds.cfg.Label, len(filtered))
 }
 
 // httpBaseURL converts any UberSDR URL (ws/wss/http/https) to an HTTP base URL.
