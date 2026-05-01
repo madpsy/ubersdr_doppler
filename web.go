@@ -368,7 +368,10 @@ func startHTTPServer(
 		for _, ds := range stations {
 			mean, n := ds.BaselineMean(60)
 			var meanPtr *float64
-			if n >= 5 {
+			if n >= 5 && !ds.cfg.IsReference {
+				// Apply manual offset (reference correction is already baked into
+				// each MinuteMean.CorrectedDopplerHz by BaselineMean).
+				mean -= manualOffset
 				meanPtr = &mean
 			}
 			cur := ds.CurrentReading()
@@ -570,6 +573,47 @@ func startHTTPServer(
 		w.Header().Set("Content-Type", "text/csv")
 		w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="%s"`, filepath.Base(matchPath)))
 		http.ServeContent(w, r, filepath.Base(matchPath), t, f)
+	})
+
+	// ── Audio info ─────────────────────────────────────────────────────────
+	// GET /api/audio/info?station=<label>
+	// Returns the sample rate and dial frequency for the audio preview stream.
+	// The dial frequency is carrier - 1000 Hz (USB mode); the carrier tone
+	// appears at 1000 Hz in the audio passband.
+	mux.HandleFunc("/api/audio/info", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		label := r.URL.Query().Get("station")
+		if label == "" {
+			http.Error(w, "station parameter required", http.StatusBadRequest)
+			return
+		}
+		var target *DopplerStation
+		for _, ds := range mgr.list() {
+			if ds.cfg.Label == label {
+				target = ds
+				break
+			}
+		}
+		if target == nil {
+			http.Error(w, "station not found", http.StatusNotFound)
+			return
+		}
+		target.streamMu.RLock()
+		sr := target.streamSampleRate
+		target.streamMu.RUnlock()
+		if sr == 0 {
+			sr = 12000
+		}
+		dialFreq := target.cfg.FreqHz - 1000
+		jsonResponse(w, map[string]interface{}{
+			"sample_rate":     sr,
+			"dial_freq_hz":    dialFreq,
+			"carrier_freq_hz": target.cfg.FreqHz,
+			"label":           label,
+		})
 	})
 
 	// ── Audio preview ──────────────────────────────────────────────────────

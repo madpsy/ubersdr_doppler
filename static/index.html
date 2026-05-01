@@ -8,6 +8,7 @@
   <script>window.BASE_PATH = "{{.BasePath}}";</script>
   <script src="chart.umd.min.js"></script>
   <script src="chartjs-adapter-date-fns.bundle.min.js"></script>
+  <script src="audio-analysis.js"></script>
 </head>
 <body>
   <header>
@@ -39,6 +40,39 @@
           <button type="button" id="login-cancel" class="btn btn-secondary">Cancel</button>
         </div>
       </form>
+    </div>
+  </div>
+
+  <!-- Audio analysis modal -->
+  <div id="audio-modal" class="modal hidden">
+    <div class="modal-box audio-modal-box">
+      <div class="audio-modal-header">
+        <div>
+          <h3 id="audio-modal-title">🎧 Audio Analysis</h3>
+          <p id="audio-modal-subtitle" class="audio-modal-subtitle"></p>
+        </div>
+        <button id="audio-modal-close" class="btn btn-secondary btn-sm">✕ Close</button>
+      </div>
+
+      <!-- Status bar -->
+      <div id="audio-modal-status" class="audio-status-bar">
+        <span id="audio-status-text" class="audio-status-connecting">⬤ Connecting…</span>
+        <span id="audio-fft-info" style="margin-left:16px;color:var(--muted);font-size:0.78rem"></span>
+      </div>
+
+      <!-- FFT spectrum -->
+      <div class="audio-panel">
+        <div class="audio-panel-label">FFT Spectrum
+          <span class="audio-panel-hint">Real-world frequency axis · carrier = <span id="fft-carrier-label" style="color:var(--green)">—</span></span>
+        </div>
+        <canvas id="audio-fft-canvas" class="audio-canvas" height="160"></canvas>
+      </div>
+
+      <!-- 60-second signal + SNR graph -->
+      <div class="audio-panel">
+        <div class="audio-panel-label">60-second Signal History</div>
+        <canvas id="audio-history-canvas" class="audio-canvas" height="130"></canvas>
+      </div>
     </div>
   </div>
 

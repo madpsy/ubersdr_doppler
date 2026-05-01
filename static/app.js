@@ -36,54 +36,28 @@ const state = {
 };
 
 // ---------------------------------------------------------------------------
-// Audio preview
+// Audio preview — opens the analysis modal
 // ---------------------------------------------------------------------------
 window.toggleAudioPreview = function(label) {
-  // Helper: fully stop and release an audio element, aborting the HTTP stream.
-  function stopAudio(el) {
-    if (!el) return;
-    el.onended = null;
-    el.onerror = null;
-    el.pause();
-    el.src = '';
-    el.load(); // forces browser to abort the streaming HTTP request
-  }
-
-  if (state.audioPlaying === label) {
-    // Stop current preview
-    stopAudio(state.audioElement);
-    state.audioElement = null;
+  // If the modal is already open for this station, close it
+  if (typeof AudioAnalysisModal !== 'undefined' && AudioAnalysisModal.isOpen() && AudioAnalysisModal.activeLabel() === label) {
+    AudioAnalysisModal.close();
     state.audioPlaying = null;
     renderStatusTable();
     return;
   }
 
-  // Stop any existing preview before starting a new one
-  stopAudio(state.audioElement);
-  state.audioElement = null;
-  state.audioPlaying = null;
+  // Close any existing modal/preview first
+  if (typeof AudioAnalysisModal !== 'undefined' && AudioAnalysisModal.isOpen()) {
+    AudioAnalysisModal.close();
+  }
 
-  // Start new preview
-  const audio = new Audio(`${BASE}/api/audio/preview?station=${encodeURIComponent(label)}`);
-  audio.play().catch(e => console.warn('audio preview failed:', e));
-  audio.onended = () => {
-    if (state.audioElement === audio) {
-      state.audioPlaying = null;
-      state.audioElement = null;
-      renderStatusTable();
-    }
-  };
-  audio.onerror = () => {
-    if (state.audioElement === audio) {
-      console.warn('audio preview error for', label);
-      state.audioPlaying = null;
-      state.audioElement = null;
-      renderStatusTable();
-    }
-  };
   state.audioPlaying = label;
-  state.audioElement = audio;
   renderStatusTable();
+
+  if (typeof AudioAnalysisModal !== 'undefined') {
+    AudioAnalysisModal.open(label).catch(e => console.warn('audio modal open failed:', e));
+  }
 };
 
 // ---------------------------------------------------------------------------
@@ -1092,6 +1066,12 @@ function connectSSE() {
           drawMiniSpectrum(canvasId, s, i);
         }
         appendLivePoint(station, reading);
+        // Feed live reading into the audio analysis modal if it's open for this station
+        if (typeof AudioAnalysisModal !== 'undefined' &&
+            AudioAnalysisModal.isOpen() &&
+            AudioAnalysisModal.activeLabel() === station) {
+          AudioAnalysisModal.pushReading(reading);
+        }
         // Periodically refresh spectrum data from server
         scheduleSpectrumRefresh();
       } catch (err) {

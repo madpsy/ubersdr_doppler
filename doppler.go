@@ -1164,6 +1164,10 @@ func (ds *DopplerStation) History() []MinuteMean {
 }
 
 // BaselineMean returns the mean Doppler shift over the last n minute-means.
+// It prefers CorrectedDopplerHz (reference-corrected) when available, falling
+// back to raw DopplerHz. This ensures the value is consistent with what is
+// shown in the corrected Doppler column and is correct after a restart (the
+// correction is stored per-minute-mean on disk).
 func (ds *DopplerStation) BaselineMean(n int) (mean float64, count int) {
 	ds.mu.RLock()
 	defer ds.mu.RUnlock()
@@ -1177,7 +1181,11 @@ func (ds *DopplerStation) BaselineMean(n int) (mean float64, count int) {
 	recent := h[len(h)-n:]
 	var sum float64
 	for _, m := range recent {
-		sum += m.DopplerHz
+		if m.CorrectedDopplerHz != nil {
+			sum += *m.CorrectedDopplerHz
+		} else {
+			sum += m.DopplerHz
+		}
 	}
 	return sum / float64(len(recent)), len(recent)
 }
