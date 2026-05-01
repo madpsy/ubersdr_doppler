@@ -235,12 +235,13 @@ func (h *audioBroadcastHub) hasListeners() bool {
 // ---------------------------------------------------------------------------
 
 const (
-	// Spectrum channel parameters.
-	// We request 500 bins at 50 Hz/bin (the server's minimum safe bin bandwidth).
-	// The server may snap to a different value; we always read the actual
-	// binBandwidth from the "config" JSON message it sends after connecting.
+	// Spectrum channel parameters — 500 bins × 2 Hz/bin = 1 kHz window.
+	// This matches UberSDR's own FrequencyReferenceMonitor exactly.
+	// The server now accepts 2 Hz/bin (same as it uses internally).
+	// We always read the actual binBandwidth back from the server's "config"
+	// message in case it snaps to a different value.
 	specBinCount     = 500
-	specBinBandwidth = 50.0 // Hz/bin — minimum safe value accepted by radiod
+	specBinBandwidth = 2.0 // Hz/bin — same as UberSDR FrequencyReferenceMonitor
 
 	// History depth for minute-means (24 hours × 60 minutes).
 	historyDepth = 24 * 60
@@ -276,11 +277,12 @@ type DopplerStation struct {
 	streamSampleRate int
 
 	// Measurement state — protected by mu.
-	mu         sync.RWMutex
-	current    DopplerReading
-	history    []MinuteMean
-	latestBins []float32 // latest unwrapped spectrum bins for display
-	latestPeak int       // peak bin index in latestBins (-1 if no valid signal)
+	mu          sync.RWMutex
+	current     DopplerReading
+	history     []MinuteMean
+	latestBins  []float32 // latest unwrapped spectrum bins for display
+	latestPeak  int       // peak bin index in latestBins (-1 if no valid signal)
+	latestBinBW float64   // actual bin bandwidth (Hz) reported by server
 
 	// 1-second sample accumulator for minute-mean calculation.
 	sampleMu sync.Mutex
@@ -611,6 +613,7 @@ func (ds *DopplerStation) runSpectrumLoop(ctx context.Context) {
 			ds.current = reading
 			ds.latestBins = binsCopy
 			ds.latestPeak = peakBin
+			ds.latestBinBW = binBW
 			ds.mu.Unlock()
 
 			// Write 1-second reading to Grape CSV
@@ -876,17 +879,22 @@ func detectDopplerWithPeak(bins []float32, binBandwidth, minSNR, maxDriftHz floa
 	}, peakBin
 }
 
-// LatestSpectrum returns the latest unwrapped spectrum bins and peak bin index
-// for the mini-spectrum display. Returns nil if no data yet.
-func (ds *DopplerStation) LatestSpectrum() (bins []float32, peakBin int) {
+// LatestSpectrum returns the latest unwrapped spectrum bins, peak bin index,
+// and actual bin bandwidth (Hz) for the mini-spectrum display.
+// Returns nil bins if no data yet.
+func (ds *DopplerStation) LatestSpectrum() (bins []float32, peakBin int, binBW float64) {
 	ds.mu.RLock()
 	defer ds.mu.RUnlock()
 	if len(ds.latestBins) == 0 {
-		return nil, -1
+		return nil, -1, specBinBandwidth
 	}
 	out := make([]float32, len(ds.latestBins))
 	copy(out, ds.latestBins)
-	return out, ds.latestPeak
+	bw := ds.latestBinBW
+	if bw <= 0 {
+		bw = specBinBandwidth
+	}
+	return out, ds.latestPeak, bw
 }
 
 // percentileFloat32 returns the p-th percentile (0–100) of a float32 slice

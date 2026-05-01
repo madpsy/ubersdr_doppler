@@ -354,15 +354,15 @@ function attachSpecInteraction(canvas, canvasId, getN) {
     if (!n) return;
     const view = getSpecView(canvasId, n);
     const ML = 44;
-    const plotW = canvas.width - ML;
-    // Map cursor X to bin index
+    // Use CSS pixel dimensions (clientWidth) so coords match e.clientX
+    const plotW = canvas.clientWidth - ML;
     const rect = canvas.getBoundingClientRect();
     const cursorFrac = Math.max(0, Math.min(1, (e.clientX - rect.left - ML) / plotW));
     const cursorBin = (view.centerBin - view.halfSpan) + cursorFrac * view.halfSpan * 2;
     const factor = e.deltaY < 0 ? 0.7 : 1.4;
     const newHalfSpan = Math.max(5, Math.min(n / 2, view.halfSpan * factor));
-    // Keep cursor bin stationary: adjust center so cursorBin stays at cursorFrac
-    view.centerBin = cursorBin - (cursorFrac - 0.5) * newHalfSpan * 2;
+    // Keep cursor bin stationary: newCenter so cursorBin stays at cursorFrac
+    view.centerBin = cursorBin + (0.5 - cursorFrac) * newHalfSpan * 2;
     view.halfSpan = newHalfSpan;
     // Clamp
     view.centerBin = Math.max(view.halfSpan, Math.min(n - view.halfSpan, view.centerBin));
@@ -383,7 +383,8 @@ function attachSpecInteraction(canvas, canvasId, getN) {
     if (!n) return;
     const view = getSpecView(canvasId, n);
     const ML = 44;
-    const plotW = canvas.width - ML;
+    // Use CSS pixel dimensions for drag distance
+    const plotW = canvas.clientWidth - ML;
     const binsPerPx = (view.halfSpan * 2) / plotW;
     const dx = e.clientX - dragStart;
     // Invert: drag right → pan left (lower bins)
@@ -444,18 +445,32 @@ function drawMiniSpectrum(canvasId, s, stationIdx) {
   const canvas = document.getElementById(canvasId);
   if (!canvas) return;
   const ctx = canvas.getContext('2d');
-  const W = canvas.width;
-  const H = canvas.height;
+
+  // Match canvas buffer to its CSS display size × devicePixelRatio so text
+  // and lines are crisp and not stretched on any screen width.
+  const dpr = window.devicePixelRatio || 1;
+  const cssW = canvas.clientWidth  || 500;
+  const cssH = canvas.clientHeight || 100;
+  const W = Math.round(cssW * dpr);
+  const H = Math.round(cssH * dpr);
+  if (canvas.width !== W || canvas.height !== H) {
+    canvas.width  = W;
+    canvas.height = H;
+  }
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  // From here all coordinates are in CSS pixels (cssW × cssH logical space)
+  const CW = cssW;
+  const CH = cssH;
 
   // Layout margins for axes
   const ML = 44; // left margin for dBFS labels
   const MB = 18; // bottom margin for Hz labels
-  const plotW = W - ML;
-  const plotH = H - MB;
+  const plotW = CW - ML;
+  const plotH = CH - MB;
 
-  ctx.clearRect(0, 0, W, H);
+  ctx.clearRect(0, 0, CW, CH);
   ctx.fillStyle = '#0d1117';
-  ctx.fillRect(0, 0, W, H);
+  ctx.fillRect(0, 0, CW, CH);
 
   const spectrum = s.spectrum_data;
   const peakBin = s.peak_bin !== undefined ? s.peak_bin : -1;
@@ -465,13 +480,13 @@ function drawMiniSpectrum(canvasId, s, stationIdx) {
     ctx.fillStyle = '#8b949e';
     ctx.font = '11px sans-serif';
     ctx.textAlign = 'center';
-    ctx.fillText('Waiting for spectrum data…', ML + plotW / 2, H / 2);
+    ctx.fillText('Waiting for spectrum data…', ML + plotW / 2, CH / 2);
     if (infoEl) infoEl.textContent = '';
     return;
   }
 
   const n = spectrum.length;
-  const hzPerBin = 2; // specBinBandwidth = 2 Hz/bin
+  const hzPerBin = s.bin_bandwidth > 0 ? s.bin_bandwidth : 50; // actual Hz/bin from server
 
   // ── Zoom/pan view window ──────────────────────────────────────────────────
   const view = getSpecView(canvasId, n);
@@ -525,7 +540,7 @@ function drawMiniSpectrum(canvasId, s, stationIdx) {
     ctx.setLineDash([2, 2]);
     ctx.beginPath();
     ctx.moveTo(ML, y);
-    ctx.lineTo(W, y);
+    ctx.lineTo(CW, y);
     ctx.stroke();
     ctx.setLineDash([]);
   }
@@ -548,9 +563,9 @@ function drawMiniSpectrum(canvasId, s, stationIdx) {
   for (let hz = firstLabel; hz <= hzEnd; hz += hzStep) {
     const bin = n / 2 + hz / hzPerBin;
     const x = binToX(bin);
-    if (x < ML || x > W) continue;
+    if (x < ML || x > CW) continue;
     ctx.fillStyle = '#8b949e';
-    ctx.fillText((hz >= 0 ? '+' : '') + hz, x, H - 3);
+    ctx.fillText((hz >= 0 ? '+' : '') + hz, x, CH - 3);
     ctx.strokeStyle = '#21262d';
     ctx.lineWidth = 1;
     ctx.setLineDash([2, 2]);
@@ -562,11 +577,11 @@ function drawMiniSpectrum(canvasId, s, stationIdx) {
   }
   ctx.textAlign = 'right';
   ctx.fillStyle = '#555';
-  ctx.fillText('Hz', W - 2, H - 3);
+  ctx.fillText('Hz', CW - 2, CH - 3);
 
   // ── Centre line (nominal carrier — green dashed) ──────────────────────────
   const centreX = binToX(n / 2);
-  if (centreX >= ML && centreX <= W) {
+  if (centreX >= ML && centreX <= CW) {
     ctx.strokeStyle = '#3fb950';
     ctx.lineWidth = 1;
     ctx.setLineDash([3, 3]);
@@ -580,7 +595,7 @@ function drawMiniSpectrum(canvasId, s, stationIdx) {
   // ── Peak marker (red solid) ───────────────────────────────────────────────
   if (peakBin >= 0 && peakBin < n) {
     const peakX = binToX(peakBin);
-    if (peakX >= ML && peakX <= W) {
+    if (peakX >= ML && peakX <= CW) {
       ctx.strokeStyle = '#f85149';
       ctx.lineWidth = 2;
       ctx.beginPath();

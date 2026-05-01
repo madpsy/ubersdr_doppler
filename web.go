@@ -356,6 +356,7 @@ func startHTTPServer(
 			CorrectedDoppler *float64       `json:"corrected_doppler_hz"`
 			SpectrumData     []float32      `json:"spectrum_data"` // latest unwrapped FFT bins for mini-spectrum display
 			PeakBin          int            `json:"peak_bin"`      // peak bin index (-1 if no valid signal)
+			BinBandwidth     float64        `json:"bin_bandwidth"` // actual Hz per bin (from server config message)
 		}
 		refHz, refValid := mgr.referenceCorrection()
 		settingsMu.RLock()
@@ -382,7 +383,7 @@ func startHTTPServer(
 					corrPtr = &corr
 				}
 			}
-			specBins, peakBin := ds.LatestSpectrum()
+			specBins, peakBin, binBW := ds.LatestSpectrum()
 			out = append(out, stationStatus{
 				Config:           ds.cfg,
 				Current:          cur,
@@ -391,6 +392,7 @@ func startHTTPServer(
 				CorrectedDoppler: corrPtr,
 				SpectrumData:     specBins,
 				PeakBin:          peakBin,
+				BinBandwidth:     binBW,
 			})
 		}
 		jsonResponse(w, out)
