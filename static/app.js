@@ -242,8 +242,8 @@ function renderStatusTable() {
     thead.innerHTML = `
       <th>Station</th>
       <th>Frequency</th>
-      <th>Doppler (raw)</th>
-      ${showRef ? '<th>Doppler (corrected)</th>' : ''}
+      <th>Raw</th>
+      ${showRef ? '<th>Corrected</th>' : ''}
       <th>1h Baseline</th>
       <th>SNR</th>
       <th>Signal</th>
