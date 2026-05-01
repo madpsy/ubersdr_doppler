@@ -105,10 +105,14 @@ td { font-variant-numeric: tabular-nums; }
 .doppler-zero { color: var(--muted); }
 .invalid      { color: var(--muted); font-style: italic; }
 
-.state-ok      { color: var(--green); }
-.state-weak    { color: var(--yellow); }
-.state-nosig   { color: var(--red); font-weight: 600; }
-.state-stale   { color: var(--yellow); font-weight: 600; }
+.state-excellent { color: #58ffb0; font-weight: 600; }          /* bright cyan-green  ≥50 dB */
+.state-verygood  { color: var(--green); font-weight: 600; }     /* green              ≥45 dB */
+.state-ok        { color: #8bc34a; }                            /* yellow-green       ≥40 dB */
+.state-fair      { color: var(--yellow); }                      /* amber              ≥35 dB */
+.state-poor      { color: #e07b39; }                            /* orange             ≥30 dB */
+.state-weak      { color: var(--yellow); }                      /* kept for compat    (unused) */
+.state-nosig     { color: var(--red); font-weight: 600; }
+.state-stale     { color: var(--yellow); font-weight: 600; }
 
 /* Row-level signal-loss and staleness highlights */
 tr.row-nosig td  { background: rgba(248,81,73,0.06); }
@@ -139,9 +143,13 @@ tr.row-stale td  { background: rgba(210,153,34,0.08); }
   vertical-align: middle;
   flex-shrink: 0;
 }
-.backend-dot-ok     { background: var(--green); }
-.backend-dot-nosig  { background: var(--red); }
-.backend-dot-stale  { background: var(--yellow); }
+.backend-dot-excellent { background: #58ffb0; }
+.backend-dot-verygood  { background: var(--green); }
+.backend-dot-ok        { background: #8bc34a; }
+.backend-dot-fair      { background: var(--yellow); }
+.backend-dot-poor      { background: #e07b39; }
+.backend-dot-nosig     { background: var(--red); }
+.backend-dot-stale     { background: var(--yellow); }
 
 /* Charts */
 .chart-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 14px; flex-wrap: wrap; gap: 8px; }

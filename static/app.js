@@ -306,18 +306,23 @@ function renderStatusTable() {
     }
 
     // State cell — stale takes priority over no-signal
+    // SNR quality scale: Poor ≥30 dB · Fair ≥35 · Good ≥40 · Very Good ≥45 · Excellent ≥50
     let stateTxt;
     if (stale) {
       const agoStr = fmtAgo(lastSeen) || 'unknown';
       stateTxt = `<span class="state-stale" title="Backend has not sent data for ${agoStr}">⚠ Stale (${agoStr})</span>`;
     } else if (!valid) {
       stateTxt = '<span class="state-nosig">● No signal</span>';
-    } else if (r.snr_db >= 20) {
+    } else if (r.snr_db >= 50) {
+      stateTxt = '<span class="state-excellent">● Excellent</span>';
+    } else if (r.snr_db >= 45) {
+      stateTxt = '<span class="state-verygood">● Very Good</span>';
+    } else if (r.snr_db >= 40) {
       stateTxt = '<span class="state-ok">● Good</span>';
-    } else if (r.snr_db >= 10) {
-      stateTxt = '<span class="state-weak">● Weak</span>';
+    } else if (r.snr_db >= 35) {
+      stateTxt = '<span class="state-fair">● Fair</span>';
     } else {
-      stateTxt = '<span class="state-weak">● Marginal</span>';
+      stateTxt = '<span class="state-poor">● Poor</span>';
     }
 
     // Per-station backend connection dot (shown next to the station name)
@@ -329,6 +334,21 @@ function renderStatusTable() {
     } else if (!valid) {
       dotClass = 'backend-dot-nosig';
       dotTitle = 'Signal below SNR threshold';
+    } else if (r.snr_db >= 50) {
+      dotClass = 'backend-dot-excellent';
+      dotTitle = `Excellent signal — SNR ${r.snr_db.toFixed(1)} dB`;
+    } else if (r.snr_db >= 45) {
+      dotClass = 'backend-dot-verygood';
+      dotTitle = `Very good signal — SNR ${r.snr_db.toFixed(1)} dB`;
+    } else if (r.snr_db >= 40) {
+      dotClass = 'backend-dot-ok';
+      dotTitle = `Good signal — SNR ${r.snr_db.toFixed(1)} dB`;
+    } else if (r.snr_db >= 35) {
+      dotClass = 'backend-dot-fair';
+      dotTitle = `Fair signal — SNR ${r.snr_db.toFixed(1)} dB`;
+    } else {
+      dotClass = 'backend-dot-poor';
+      dotTitle = `Poor signal — SNR ${r.snr_db.toFixed(1)} dB`;
     }
     const backendDot = `<span class="backend-dot ${dotClass}" title="${dotTitle}"></span>`;
 
