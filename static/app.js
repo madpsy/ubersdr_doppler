@@ -579,7 +579,29 @@ function drawMiniSpectrum(canvasId, s, stationIdx) {
   }
 
   // ── Peak marker (red solid) ───────────────────────────────────────────────
-  if (peakBin >= 0 && peakBin < n) {
+  // Draw the marker at the sub-bin interpolated position derived from doppler_hz
+  // rather than the integer peakBin, so it accurately reflects the measured frequency.
+  const hasCurrent = s.current && s.current.valid;
+  if (hasCurrent) {
+    // Sub-bin centroid position: centre_bin + doppler_hz / hzPerBin
+    const subBinPos = n / 2 + s.current.doppler_hz / hzPerBin;
+    const peakX = binToX(subBinPos);
+    if (peakX >= ML && peakX <= CW) {
+      ctx.strokeStyle = '#f85149';
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.moveTo(peakX, 0);
+      ctx.lineTo(peakX, plotH);
+      ctx.stroke();
+    }
+    const dHz = s.current.doppler_hz;
+    const sign = dHz >= 0 ? '+' : '';
+    if (infoEl) {
+      infoEl.textContent = `${sign}${dHz.toFixed(3)} Hz  SNR: ${s.current.snr_db.toFixed(1)} dB`;
+      infoEl.style.color = Math.abs(dHz) < 0.5 ? 'var(--green)' : 'var(--accent)';
+    }
+  } else if (peakBin >= 0 && peakBin < n) {
+    // No valid reading yet but we have a peak bin — draw marker at integer bin
     const peakX = binToX(peakBin);
     if (peakX >= ML && peakX <= CW) {
       ctx.strokeStyle = '#f85149';
@@ -589,12 +611,7 @@ function drawMiniSpectrum(canvasId, s, stationIdx) {
       ctx.lineTo(peakX, plotH);
       ctx.stroke();
     }
-    if (infoEl && s.current && s.current.valid) {
-      const dHz = s.current.doppler_hz;
-      const sign = dHz >= 0 ? '+' : '';
-      infoEl.textContent = `${sign}${dHz.toFixed(3)} Hz  SNR: ${s.current.snr_db.toFixed(1)} dB`;
-      infoEl.style.color = Math.abs(dHz) < 0.5 ? 'var(--green)' : 'var(--accent)';
-    } else if (infoEl) {
+    if (infoEl) {
       infoEl.textContent = 'No signal';
       infoEl.style.color = 'var(--muted)';
     }

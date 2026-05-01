@@ -19,11 +19,12 @@
 // ---------------------------------------------------------------------------
 const AudioAnalysisModal = (() => {
   // State
-  let _label        = null;
-  let _dialFreqHz   = 0;
-  let _carrierFreqHz = 0;
-  let _sampleRate   = 12000;
-  let _open         = false;
+  let _label          = null;
+  let _dialFreqHz     = 0;
+  let _carrierFreqHz  = 0;
+  let _sampleRate     = 12000;
+  let _open           = false;
+  let _lastReading    = null;  // most recent SSE reading for the active station
 
   // Audio passband limits (Hz, audio-relative from dial frequency).
   // Must match the bandwidthLow/bandwidthHigh sent to UberSDR in doppler.go.
@@ -58,6 +59,15 @@ const AudioAnalysisModal = (() => {
   let smoothMag     = null;
   const SMOOTH_ALPHA = 0.3;   // blend factor for new frame (higher = more responsive)
 
+  // Smoothed Y-axis scale bounds — updated slowly so the axis doesn't jump every frame.
+  // dbFloorSmooth tracks the noise floor (decays down slowly, snaps up quickly).
+  // dbCeilSmooth  tracks the peak    (snaps up quickly, decays down slowly).
+  let dbFloorSmooth = null;
+  let dbCeilSmooth  = null;
+  // How quickly the scale expands (fast) vs contracts (slow).
+  const SCALE_EXPAND_ALPHA  = 0.15;  // fast: new peak appears → scale grows quickly
+  const SCALE_SHRINK_ALPHA  = 0.005; // slow: peak gone → scale shrinks over ~200 frames
+
   // FFT zoom/pan state (in passband-bin space)
   // binView: { lo, hi } — the range of passband bins currently visible
   // null = full passband view (reset on open)
@@ -69,6 +79,7 @@ const AudioAnalysisModal = (() => {
   // ---------------------------------------------------------------------------
   function pushReading(reading) {
     if (!_open || !reading.valid) return;
+    _lastReading = reading;
     const now    = Date.now();
     const cutoff = now - HISTORY_SECS * 1000;
     histSignal.push({ t: now, v: reading.signal_dbfs });
@@ -90,6 +101,9 @@ const AudioAnalysisModal = (() => {
     histSNR.length    = 0;
     smoothMag         = null;
     fftView           = null; // reset to full passband view
+    dbFloorSmooth     = null; // reset scale smoothing on open
+    dbCeilSmooth      = null;
+    _lastReading      = null;
 
     // Show modal
     const modal = document.getElementById('audio-modal');
@@ -380,7 +394,8 @@ const AudioAnalysisModal = (() => {
     // Helper: bin index → X pixel within [ML, ML+plotW]
     const binToX = i => ML + ((i - binLow) / (numBins - 1)) * plotW;
 
-    // dB range over passband bins only
+    // dB range over passband bins only — use smoothed bounds so the axis
+    // doesn't jump every frame as the instantaneous min/max fluctuates.
     let minDB = Infinity, maxDB = -Infinity;
     for (let i = binLow; i <= binHigh; i++) {
       if (!isFinite(smoothMag[i])) continue;
@@ -388,8 +403,27 @@ const AudioAnalysisModal = (() => {
       if (smoothMag[i] > maxDB) maxDB = smoothMag[i];
     }
     if (!isFinite(minDB)) { minDB = -120; maxDB = -40; }
-    const dbFloor = Math.floor(minDB / 10) * 10;
-    const dbCeil  = Math.ceil(maxDB  / 10) * 10;
+
+    // Bootstrap smoothed bounds on first valid frame
+    if (dbFloorSmooth === null) { dbFloorSmooth = minDB; dbCeilSmooth = maxDB; }
+
+    // Expand quickly when signal grows, shrink slowly when it fades
+    if (minDB < dbFloorSmooth) {
+      dbFloorSmooth = dbFloorSmooth * (1 - SCALE_EXPAND_ALPHA) + minDB * SCALE_EXPAND_ALPHA;
+    } else {
+      dbFloorSmooth = dbFloorSmooth * (1 - SCALE_SHRINK_ALPHA) + minDB * SCALE_SHRINK_ALPHA;
+    }
+    if (maxDB > dbCeilSmooth) {
+      dbCeilSmooth = dbCeilSmooth * (1 - SCALE_EXPAND_ALPHA) + maxDB * SCALE_EXPAND_ALPHA;
+    } else {
+      dbCeilSmooth = dbCeilSmooth * (1 - SCALE_SHRINK_ALPHA) + maxDB * SCALE_SHRINK_ALPHA;
+    }
+
+    // Snap to 10 dB-rounded boundaries for clean grid lines, but only move
+    // the boundary when the smoothed value crosses the current rounded edge
+    // (avoids the axis ticking up/down by 10 dB on every frame).
+    const dbFloor = Math.floor(dbFloorSmooth / 10) * 10;
+    const dbCeil  = Math.ceil(dbCeilSmooth  / 10) * 10;
     const dbRange = dbCeil - dbFloor || 10;
     const dbToY   = db => plotH - ((db - dbFloor) / dbRange) * plotH;
 
@@ -443,7 +477,7 @@ const AudioAnalysisModal = (() => {
     ctx.fillStyle = '#555';
     ctx.fillText('Hz', CW - 2, CH - 3);
 
-    // Carrier marker (green dashed) at carrierFreqHz
+    // Expected carrier (green dashed) — nominal carrier frequency with no Doppler
     if (_carrierFreqHz >= freqStart && _carrierFreqHz <= freqEnd) {
       const cx = ML + ((_carrierFreqHz - freqStart) / freqSpan) * plotW;
       ctx.strokeStyle = '#3fb950';
@@ -454,7 +488,26 @@ const AudioAnalysisModal = (() => {
       ctx.fillStyle = '#3fb950';
       ctx.font = '9px sans-serif';
       ctx.textAlign = cx > CW - 60 ? 'right' : 'left';
-      ctx.fillText('carrier', cx + (ctx.textAlign === 'left' ? 3 : -3), 10);
+      ctx.fillText('expected', cx + (ctx.textAlign === 'left' ? 3 : -3), 10);
+    }
+
+    // Actual detected frequency (red solid) — carrier shifted by measured Doppler
+    if (_lastReading && _lastReading.valid) {
+      const dHz = (_lastReading.corrected_doppler_hz !== null && _lastReading.corrected_doppler_hz !== undefined)
+        ? _lastReading.corrected_doppler_hz
+        : _lastReading.doppler_hz;
+      const actualFreqHz = _carrierFreqHz + dHz;
+      if (actualFreqHz >= freqStart && actualFreqHz <= freqEnd) {
+        const ax = ML + ((actualFreqHz - freqStart) / freqSpan) * plotW;
+        ctx.strokeStyle = '#f85149';
+        ctx.lineWidth = 1.5;
+        ctx.setLineDash([]);
+        ctx.beginPath(); ctx.moveTo(ax, 0); ctx.lineTo(ax, plotH); ctx.stroke();
+        ctx.fillStyle = '#f85149';
+        ctx.font = '9px sans-serif';
+        ctx.textAlign = ax > CW - 60 ? 'right' : 'left';
+        ctx.fillText('actual', ax + (ctx.textAlign === 'left' ? 3 : -3), 22);
+      }
     }
 
     // Axis border
