@@ -20,6 +20,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/binary"
+	"encoding/json"
 	"fmt"
 	"log"
 	"math"
@@ -234,10 +235,12 @@ func (h *audioBroadcastHub) hasListeners() bool {
 // ---------------------------------------------------------------------------
 
 const (
-	// Spectrum channel parameters — 500 bins × 2 Hz = 1 kHz window.
-	// This matches UberSDR's own frequency reference monitor.
+	// Spectrum channel parameters.
+	// We request 500 bins at 50 Hz/bin (the server's minimum safe bin bandwidth).
+	// The server may snap to a different value; we always read the actual
+	// binBandwidth from the "config" JSON message it sends after connecting.
 	specBinCount     = 500
-	specBinBandwidth = 2.0 // Hz/bin
+	specBinBandwidth = 50.0 // Hz/bin — minimum safe value accepted by radiod
 
 	// History depth for minute-means (24 hours × 60 minutes).
 	historyDepth = 24 * 60
@@ -260,6 +263,13 @@ type DopplerStation struct {
 
 	// audioHub fans out PCM audio to preview listeners.
 	audioHub *audioBroadcastHub
+
+	// sessionID is the active user_session_id shared between the spectrum and
+	// audio WebSocket connections. Set by runSpectrumLoop after a successful
+	// /connection call; read by runAudioLoop so both connections share the same
+	// UUID (the server links them by user_session_id).
+	sessionMu sync.RWMutex
+	sessionID string
 
 	// streamSampleRate is set from the first audio packet header.
 	streamMu         sync.RWMutex
@@ -418,9 +428,11 @@ func (ds *DopplerStation) runSpectrumLoop(ctx context.Context) {
 	minuteTicker := time.NewTicker(1 * time.Minute)
 	defer minuteTicker.Stop()
 
-	// Latest spectrum bins (updated by the WebSocket goroutine)
+	// Latest spectrum bins and the actual bin bandwidth reported by the server
+	// (updated by the WebSocket goroutine; read by the measurement ticker).
 	var specMu sync.Mutex
 	var latestBins []float32
+	actualBinBW := specBinBandwidth // updated from server "config" message
 
 	// WebSocket reconnect loop
 	connCh := make(chan struct{}, 1)
@@ -447,6 +459,11 @@ func (ds *DopplerStation) runSpectrumLoop(ctx context.Context) {
 				}
 				continue
 			}
+			// Store the active session UUID so the audio loop can reuse it,
+			// linking both connections under the same user_session_id.
+			ds.sessionMu.Lock()
+			ds.sessionID = sessionID
+			ds.sessionMu.Unlock()
 
 			wsAddr := ds.spectrumWSURL(sessionID)
 
@@ -520,8 +537,22 @@ func (ds *DopplerStation) runSpectrumLoop(ctx context.Context) {
 					log.Printf("[%s] spectrum: read error: %v — reconnecting", ds.cfg.Label, err)
 					break
 				}
-				// Skip text (JSON) control messages from the server.
+				// Text (JSON) control messages from the server.
+				// Parse "config" to learn the actual binBandwidth the server is using.
 				if msgType != websocket.BinaryMessage {
+					if msgType == websocket.TextMessage {
+						var cfg struct {
+							Type         string  `json:"type"`
+							BinBandwidth float64 `json:"binBandwidth"`
+						}
+						if err2 := json.Unmarshal(msg, &cfg); err2 == nil &&
+							cfg.Type == "config" && cfg.BinBandwidth > 0 {
+							specMu.Lock()
+							actualBinBW = cfg.BinBandwidth
+							specMu.Unlock()
+							log.Printf("[%s] spectrum: server binBandwidth=%.2f Hz", ds.cfg.Label, cfg.BinBandwidth)
+						}
+					}
 					continue
 				}
 				bins, ok := dec.decode(msg)
@@ -562,13 +593,14 @@ func (ds *DopplerStation) runSpectrumLoop(ctx context.Context) {
 		case <-measureTicker.C:
 			specMu.Lock()
 			bins := latestBins
+			binBW := actualBinBW
 			specMu.Unlock()
 
 			if len(bins) == 0 {
 				continue
 			}
 
-			reading, peakBin := detectDopplerWithPeak(bins, specBinBandwidth, ds.minSNR, ds.maxDriftHz)
+			reading, peakBin := detectDopplerWithPeak(bins, binBW, ds.minSNR, ds.maxDriftHz)
 			reading.Timestamp = time.Now().UTC()
 
 			// Store spectrum snapshot for the mini-spectrum display
@@ -623,7 +655,15 @@ func (ds *DopplerStation) runAudioLoop(ctx context.Context) {
 			continue
 		}
 
-		sessionID := uuid.New().String()
+		// Reuse the spectrum session UUID so both connections share the same
+		// user_session_id. If the spectrum loop hasn't connected yet, fall back
+		// to a fresh UUID (the /connection call will register it).
+		ds.sessionMu.RLock()
+		sessionID := ds.sessionID
+		ds.sessionMu.RUnlock()
+		if sessionID == "" {
+			sessionID = uuid.New().String()
+		}
 		if err := ds.checkConnection(sessionID); err != nil {
 			time.Sleep(10 * time.Second)
 			continue
@@ -711,14 +751,25 @@ var wsDialer = &websocket.Dialer{
 // a DopplerReading. The spectrum must already be unwrapped (negative freqs
 // first, then positive freqs). The returned DopplerHz is the offset from the
 // centre bin (i.e. from the nominal carrier frequency).
+// Uses the same algorithm as UberSDR's FrequencyReferenceMonitor:
+//   - P5 noise floor (same as UberSDR)
+//   - power-weighted centroid over the contiguous 3 dB range around the peak
+//   - prefer peak near centre if within 30 dB of global max
 func detectDoppler(bins []float32, binBandwidth, minSNR, maxDriftHz float64) DopplerReading {
+	r, _ := detectDopplerWithPeak(bins, binBandwidth, minSNR, maxDriftHz)
+	return r
+}
+
+// detectDopplerWithPeak is like detectDoppler but also returns the integer peak bin index.
+// Returns -1 for peakBin when no valid signal is found.
+func detectDopplerWithPeak(bins []float32, binBandwidth, minSNR, maxDriftHz float64) (DopplerReading, int) {
 	n := len(bins)
 	if n == 0 {
-		return DopplerReading{}
+		return DopplerReading{}, -1
 	}
 
-	// Noise floor: median of all bins (robust to a single strong carrier)
-	noiseFloor := medianFloat32(bins)
+	// Noise floor: P5 percentile (same as UberSDR)
+	noiseFloor := percentileFloat32(bins, 5)
 
 	// Search range: centre bin ± maxDriftHz
 	centerBin := n / 2
@@ -732,7 +783,7 @@ func detectDoppler(bins []float32, binBandwidth, minSNR, maxDriftHz float64) Dop
 		searchHigh = n - 1
 	}
 
-	// Find peak bin in search range
+	// Find global peak bin in search range
 	peakBin := searchLow
 	peakPower := bins[searchLow]
 	for i := searchLow + 1; i <= searchHigh; i++ {
@@ -742,64 +793,80 @@ func detectDoppler(bins []float32, binBandwidth, minSNR, maxDriftHz float64) Dop
 		}
 	}
 
-	snr := peakPower - noiseFloor
-
-	if float64(snr) < minSNR {
-		return DopplerReading{
-			SNR:        snr,
-			SignalDBFS: peakPower,
-			NoiseDBFS:  noiseFloor,
-			Valid:      false,
-		}
-	}
-
-	// Sub-bin interpolation using parabolic peak
-	// subBinFreq returns (centroidBin - n/2) * binBandwidth, which is already
-	// the frequency offset from the carrier (Doppler shift). No further
-	// subtraction of carrierHz is needed.
-	dopplerHz := subBinFreq(bins, peakBin, binBandwidth, n)
-
-	return DopplerReading{
-		DopplerHz:  dopplerHz,
-		SNR:        snr,
-		SignalDBFS: peakPower,
-		NoiseDBFS:  noiseFloor,
-		Valid:      true,
-	}
-}
-
-// detectDopplerWithPeak is like detectDoppler but also returns the integer peak bin index.
-// Returns -1 for peakBin when no valid signal is found.
-func detectDopplerWithPeak(bins []float32, binBandwidth, minSNR, maxDriftHz float64) (DopplerReading, int) {
-	n := len(bins)
-	if n == 0 {
-		return DopplerReading{}, -1
-	}
-	noiseFloor := medianFloat32(bins)
-	centerBin := n / 2
-	driftBins := int(maxDriftHz / binBandwidth)
-	searchLow := centerBin - driftBins
-	searchHigh := centerBin + driftBins
-	if searchLow < 0 {
-		searchLow = 0
-	}
-	if searchHigh >= n {
-		searchHigh = n - 1
-	}
-	peakBin := searchLow
-	peakPower := bins[searchLow]
-	for i := searchLow + 1; i <= searchHigh; i++ {
-		if bins[i] > peakPower {
-			peakPower = bins[i]
-			peakBin = i
-		}
-	}
 	snr := peakPower - noiseFloor
 	if float64(snr) < minSNR {
 		return DopplerReading{SNR: snr, SignalDBFS: peakPower, NoiseDBFS: noiseFloor, Valid: false}, -1
 	}
-	// subBinFreq already returns the offset from carrier (Doppler shift).
-	dopplerHz := subBinFreq(bins, peakBin, binBandwidth, n)
+
+	// Prefer peak near centre if within 30 dB of global max (same as UberSDR)
+	centerRegionStart := centerBin - 5
+	centerRegionEnd := centerBin + 5
+	centerPeakPower := float32(-999)
+	centerPeakBin := -1
+	for i := centerRegionStart; i <= centerRegionEnd; i++ {
+		if i >= 0 && i < n && bins[i] > centerPeakPower {
+			centerPeakPower = bins[i]
+			centerPeakBin = i
+		}
+	}
+	if centerPeakBin >= 0 && (centerPeakPower-noiseFloor) >= float32(minSNR) &&
+		(peakPower-centerPeakPower) <= 30.0 {
+		peakBin = centerPeakBin
+		peakPower = centerPeakPower
+	}
+
+	// Power-weighted centroid over contiguous 3 dB range (same as UberSDR)
+	threshold := peakPower - 3.0
+	startBin := peakBin
+	endBin := peakBin
+	for i := peakBin - 1; i >= 0 && bins[i] >= threshold; i-- {
+		startBin = i
+	}
+	for i := peakBin + 1; i < n && bins[i] >= threshold; i++ {
+		endBin = i
+	}
+
+	var weightedSum, totalWeight float64
+	for i := startBin; i <= endBin; i++ {
+		linearPower := math.Pow(10.0, float64(bins[i])/10.0)
+		weightedSum += float64(i) * linearPower
+		totalWeight += linearPower
+	}
+
+	var centroidBin float64
+	if totalWeight > 0 {
+		centroidBin = weightedSum / totalWeight
+	} else {
+		// Fallback: parabolic interpolation (same as UberSDR fallback)
+		if peakBin > 0 && peakBin < n-1 {
+			alpha := float64(bins[peakBin-1])
+			beta := float64(bins[peakBin])
+			gamma := float64(bins[peakBin+1])
+			denom := alpha - 2*beta + gamma
+			if math.Abs(denom) > 0.001 {
+				p := 0.5 * (alpha - gamma) / denom
+				if p > 0.5 {
+					p = 0.5
+				} else if p < -0.5 {
+					p = -0.5
+				}
+				centroidBin = float64(peakBin) + p
+			} else {
+				centroidBin = float64(peakBin)
+			}
+		} else {
+			centroidBin = float64(peakBin)
+		}
+	}
+
+	// Offset from centre bin → Doppler Hz
+	dopplerHz := (centroidBin - float64(n)/2.0) * binBandwidth
+
+	// Final validation: reject if centroid drifted outside allowed range (same as UberSDR)
+	if math.Abs(dopplerHz) > maxDriftHz {
+		return DopplerReading{SNR: snr, SignalDBFS: peakPower, NoiseDBFS: noiseFloor, Valid: false}, -1
+	}
+
 	return DopplerReading{
 		DopplerHz:  dopplerHz,
 		SNR:        snr,
@@ -822,54 +889,21 @@ func (ds *DopplerStation) LatestSpectrum() (bins []float32, peakBin int) {
 	return out, ds.latestPeak
 }
 
-// subBinFreq returns the interpolated frequency (Hz) of the peak using
-// parabolic interpolation on the three bins around peakBin.
-// After unwrapping, bin 0 = carrierHz - (n/2)*binBandwidth,
-// bin n/2 = carrierHz, bin n-1 = carrierHz + (n/2-1)*binBandwidth.
-func subBinFreq(bins []float32, peakBin int, binBandwidth float64, n int) float64 {
-	var centroidBin float64
-	if peakBin > 0 && peakBin < n-1 {
-		alpha := float64(bins[peakBin-1])
-		beta := float64(bins[peakBin])
-		gamma := float64(bins[peakBin+1])
-		denom := alpha - 2*beta + gamma
-		var offset float64
-		if math.Abs(denom) > 0.001 {
-			offset = 0.5 * (alpha - gamma) / denom
-			if offset > 0.5 {
-				offset = 0.5
-			} else if offset < -0.5 {
-				offset = -0.5
-			}
-		}
-		centroidBin = float64(peakBin) + offset
-	} else {
-		centroidBin = float64(peakBin)
-	}
-
-	// Convert bin index to absolute frequency
-	// bin 0 = center - (n/2)*binBandwidth
-	// bin n/2 = center (carrier)
-	// bin i = center + (i - n/2) * binBandwidth
-	// But we don't know center here — return offset from center instead
-	// and let the caller add carrierHz.
-	// Actually: return absolute frequency = carrierHz + (centroidBin - n/2) * binBandwidth
-	// We pass n as parameter so we can compute this.
-	return float64(0) + (centroidBin-float64(n)/2.0)*binBandwidth
-	// Note: caller adds carrierHz via: dopplerHz = peakFreqHz - carrierHz
-	// which simplifies to: dopplerHz = (centroidBin - n/2) * binBandwidth
-}
-
-// medianFloat32 returns the median value of a float32 slice without modifying it.
-// Uses sort.Slice (O(n log n)) — safe for large FFT magnitude arrays.
-func medianFloat32(data []float32) float32 {
+// percentileFloat32 returns the p-th percentile (0–100) of a float32 slice
+// without modifying it. Uses sort.Slice (O(n log n)).
+// Matches the method used by UberSDR's FrequencyReferenceMonitor (P5 noise floor).
+func percentileFloat32(data []float32, p int) float32 {
 	if len(data) == 0 {
 		return 0
 	}
 	tmp := make([]float32, len(data))
 	copy(tmp, data)
 	sort.Slice(tmp, func(i, j int) bool { return tmp[i] < tmp[j] })
-	return tmp[len(tmp)/2]
+	idx := len(tmp) * p / 100
+	if idx >= len(tmp) {
+		idx = len(tmp) - 1
+	}
+	return tmp[idx]
 }
 
 // ---------------------------------------------------------------------------

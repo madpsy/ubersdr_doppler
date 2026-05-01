@@ -309,7 +309,100 @@ function renderStatusTable() {
 // ---------------------------------------------------------------------------
 // Mini spectrum display — one canvas per station showing the 1 kHz window
 // Matches UberSDR's frequency reference monitor display style.
+// Supports mouse-wheel zoom and click-drag pan.
 // ---------------------------------------------------------------------------
+
+// Per-canvas zoom/pan state: { centerBin, halfSpan }
+// centerBin: the bin index at the centre of the view (default n/2)
+// halfSpan:  half the number of bins visible (default n/2 = full view)
+const specViewState = {};
+
+// Set to true whenever zoom/pan changes so the rAF loop redraws.
+let specDirty = false;
+
+function startSpecRenderLoop() {
+  function loop() {
+    if (specDirty) {
+      specDirty = false;
+      state.stations.forEach((s, i) => {
+        const label = s.config.label;
+        const canvasId = `spec-canvas-${label.replace(/[^a-zA-Z0-9]/g, '_')}`;
+        drawMiniSpectrum(canvasId, s, i);
+      });
+    }
+    requestAnimationFrame(loop);
+  }
+  requestAnimationFrame(loop);
+}
+
+function getSpecView(canvasId, n) {
+  if (!specViewState[canvasId]) {
+    specViewState[canvasId] = { centerBin: n / 2, halfSpan: n / 2 };
+  }
+  return specViewState[canvasId];
+}
+
+function attachSpecInteraction(canvas, canvasId, getN) {
+  // Prevent duplicate listeners
+  if (canvas._specInteractionAttached) return;
+  canvas._specInteractionAttached = true;
+
+  // Mouse wheel → zoom (zoom towards cursor position)
+  canvas.addEventListener('wheel', e => {
+    e.preventDefault();
+    const n = getN();
+    if (!n) return;
+    const view = getSpecView(canvasId, n);
+    const ML = 44;
+    const plotW = canvas.width - ML;
+    // Map cursor X to bin index
+    const rect = canvas.getBoundingClientRect();
+    const cursorFrac = Math.max(0, Math.min(1, (e.clientX - rect.left - ML) / plotW));
+    const cursorBin = (view.centerBin - view.halfSpan) + cursorFrac * view.halfSpan * 2;
+    const factor = e.deltaY < 0 ? 0.7 : 1.4;
+    const newHalfSpan = Math.max(5, Math.min(n / 2, view.halfSpan * factor));
+    // Keep cursor bin stationary: adjust center so cursorBin stays at cursorFrac
+    view.centerBin = cursorBin - (cursorFrac - 0.5) * newHalfSpan * 2;
+    view.halfSpan = newHalfSpan;
+    // Clamp
+    view.centerBin = Math.max(view.halfSpan, Math.min(n - view.halfSpan, view.centerBin));
+    specDirty = true;
+  }, { passive: false });
+
+  // Click-drag → pan
+  let dragStart = null;
+  let dragCenter = null;
+  canvas.addEventListener('mousedown', e => {
+    dragStart = e.clientX;
+    const n = getN();
+    if (n) dragCenter = getSpecView(canvasId, n).centerBin;
+  });
+  canvas.addEventListener('mousemove', e => {
+    if (dragStart === null) return;
+    const n = getN();
+    if (!n) return;
+    const view = getSpecView(canvasId, n);
+    const ML = 44;
+    const plotW = canvas.width - ML;
+    const binsPerPx = (view.halfSpan * 2) / plotW;
+    const dx = e.clientX - dragStart;
+    // Invert: drag right → pan left (lower bins)
+    view.centerBin = Math.max(view.halfSpan,
+      Math.min(n - view.halfSpan, dragCenter - dx * binsPerPx));
+    specDirty = true;
+  });
+  const endDrag = () => { dragStart = null; dragCenter = null; };
+  canvas.addEventListener('mouseup', endDrag);
+  canvas.addEventListener('mouseleave', endDrag);
+
+  // Double-click → reset zoom
+  canvas.addEventListener('dblclick', () => {
+    const n = getN();
+    if (!n) return;
+    specViewState[canvasId] = { centerBin: n / 2, halfSpan: n / 2 };
+    specDirty = true;
+  });
+}
 
 function drawMiniSpectra() {
   const container = document.getElementById('mini-spectra');
@@ -335,10 +428,14 @@ function drawMiniSpectra() {
           <strong style="color:var(--text)">${label}</strong>
           <span style="margin-left:8px">${fmtHz(s.config.freq_hz)}</span>
           <span id="spec-info-${canvasId}" style="margin-left:12px;color:var(--accent)"></span>
+          <span style="margin-left:8px;font-size:0.75rem;color:var(--muted)">scroll to zoom · drag to pan · dbl-click to reset</span>
         </div>
-        <canvas id="${canvasId}" width="500" height="80" style="width:100%;height:80px;background:var(--bg);border-radius:4px;border:1px solid var(--border)"></canvas>`;
+        <canvas id="${canvasId}" width="500" height="100" style="width:100%;height:100px;background:var(--bg);border-radius:4px;border:1px solid var(--border);cursor:crosshair"></canvas>`;
       container.appendChild(wrapper);
     }
+    const canvas = document.getElementById(canvasId);
+    const n = s.spectrum_data ? s.spectrum_data.length : 500;
+    attachSpecInteraction(canvas, canvasId, () => s.spectrum_data ? s.spectrum_data.length : 0);
     drawMiniSpectrum(canvasId, s, i);
   });
 }
@@ -349,6 +446,12 @@ function drawMiniSpectrum(canvasId, s, stationIdx) {
   const ctx = canvas.getContext('2d');
   const W = canvas.width;
   const H = canvas.height;
+
+  // Layout margins for axes
+  const ML = 44; // left margin for dBFS labels
+  const MB = 18; // bottom margin for Hz labels
+  const plotW = W - ML;
+  const plotH = H - MB;
 
   ctx.clearRect(0, 0, W, H);
   ctx.fillStyle = '#0d1117';
@@ -362,53 +465,129 @@ function drawMiniSpectrum(canvasId, s, stationIdx) {
     ctx.fillStyle = '#8b949e';
     ctx.font = '11px sans-serif';
     ctx.textAlign = 'center';
-    ctx.fillText('Waiting for spectrum data…', W / 2, H / 2);
+    ctx.fillText('Waiting for spectrum data…', ML + plotW / 2, H / 2);
     if (infoEl) infoEl.textContent = '';
     return;
   }
 
   const n = spectrum.length;
+  const hzPerBin = 2; // specBinBandwidth = 2 Hz/bin
 
-  // Find min/max for scaling
-  let minVal = spectrum[0], maxVal = spectrum[0];
-  for (let i = 1; i < n; i++) {
+  // ── Zoom/pan view window ──────────────────────────────────────────────────
+  const view = getSpecView(canvasId, n);
+  // Clamp in case n changed
+  view.halfSpan = Math.max(10, Math.min(n / 2, view.halfSpan));
+  view.centerBin = Math.max(view.halfSpan, Math.min(n - view.halfSpan, view.centerBin));
+  const binStart = view.centerBin - view.halfSpan;
+  const binEnd   = view.centerBin + view.halfSpan;
+
+  // Helper: bin index → X pixel (maps [binStart, binEnd] → [ML, ML+plotW])
+  const binToX = b => ML + ((b - binStart) / (binEnd - binStart)) * plotW;
+
+  // Compute dBFS range over the visible window only
+  let minVal = Infinity, maxVal = -Infinity;
+  const iBinStart = Math.max(0, Math.floor(binStart));
+  const iBinEnd   = Math.min(n - 1, Math.ceil(binEnd));
+  for (let i = iBinStart; i <= iBinEnd; i++) {
     if (spectrum[i] < minVal) minVal = spectrum[i];
     if (spectrum[i] > maxVal) maxVal = spectrum[i];
   }
-  const range = maxVal - minVal || 1;
+  if (!isFinite(minVal)) { minVal = -140; maxVal = -80; }
+  // Round to nearest 10 dB for clean axis labels
+  const dbMin = Math.floor(minVal / 10) * 10;
+  const dbMax = Math.ceil(maxVal / 10) * 10;
+  const dbRange = dbMax - dbMin || 10;
 
-  // Draw spectrum bars
+  // Helper: dBFS value → Y pixel
+  const dbToY = db => plotH - ((db - dbMin) / dbRange) * plotH;
+
+  // ── Draw spectrum bars (visible window only) ──────────────────────────────
   const colour = colourForIndex(stationIdx);
   ctx.fillStyle = colour + '88';
-  for (let i = 0; i < n; i++) {
-    const x = (i / n) * W;
-    const barW = Math.max(1, W / n);
-    const barH = ((spectrum[i] - minVal) / range) * (H - 4);
-    ctx.fillRect(x, H - barH, barW, barH);
+  const barW = Math.max(1, plotW / (binEnd - binStart));
+  for (let i = iBinStart; i <= iBinEnd; i++) {
+    const x = binToX(i);
+    const y = dbToY(spectrum[i]);
+    ctx.fillRect(x, y, barW, plotH - y);
   }
 
-  // Draw centre line (nominal carrier frequency — green dashed)
-  const centreX = W / 2;
-  ctx.strokeStyle = '#3fb950';
-  ctx.lineWidth = 1;
-  ctx.setLineDash([3, 3]);
-  ctx.beginPath();
-  ctx.moveTo(centreX, 0);
-  ctx.lineTo(centreX, H);
-  ctx.stroke();
-  ctx.setLineDash([]);
-
-  // Draw peak marker (red solid) if valid signal
-  if (peakBin >= 0 && peakBin < n) {
-    const peakX = (peakBin / n) * W;
-    ctx.strokeStyle = '#f85149';
-    ctx.lineWidth = 2;
+  // ── Y axis (dBFS) ─────────────────────────────────────────────────────────
+  ctx.font = '9px sans-serif';
+  ctx.textAlign = 'right';
+  const dbStep = dbRange <= 20 ? 5 : dbRange <= 40 ? 10 : 20;
+  for (let db = dbMin; db <= dbMax; db += dbStep) {
+    const y = dbToY(db);
+    if (y < 0 || y > plotH) continue;
+    ctx.fillStyle = '#8b949e';
+    ctx.fillText(db + ' dB', ML - 3, y + 3);
+    ctx.strokeStyle = '#21262d';
+    ctx.lineWidth = 1;
+    ctx.setLineDash([2, 2]);
     ctx.beginPath();
-    ctx.moveTo(peakX, 0);
-    ctx.lineTo(peakX, H);
+    ctx.moveTo(ML, y);
+    ctx.lineTo(W, y);
     ctx.stroke();
+    ctx.setLineDash([]);
+  }
 
-    // Update info label
+  // ── X axis (Hz offset from carrier) ──────────────────────────────────────
+  // Compute visible Hz range and pick sensible label spacing
+  const hzStart = (binStart - n / 2) * hzPerBin;
+  const hzEnd   = (binEnd   - n / 2) * hzPerBin;
+  const hzSpan  = hzEnd - hzStart;
+  // Pick label step: aim for ~4–6 labels
+  const rawStep = hzSpan / 5;
+  const magnitude = Math.pow(10, Math.floor(Math.log10(Math.abs(rawStep) || 1)));
+  const niceSteps = [1, 2, 5, 10, 20, 50, 100, 200, 500];
+  let hzStep = (niceSteps.find(v => v * magnitude >= rawStep) || 50) * magnitude;
+  if (hzStep < 1) hzStep = 1;
+
+  ctx.font = '9px sans-serif';
+  ctx.textAlign = 'center';
+  const firstLabel = Math.ceil(hzStart / hzStep) * hzStep;
+  for (let hz = firstLabel; hz <= hzEnd; hz += hzStep) {
+    const bin = n / 2 + hz / hzPerBin;
+    const x = binToX(bin);
+    if (x < ML || x > W) continue;
+    ctx.fillStyle = '#8b949e';
+    ctx.fillText((hz >= 0 ? '+' : '') + hz, x, H - 3);
+    ctx.strokeStyle = '#21262d';
+    ctx.lineWidth = 1;
+    ctx.setLineDash([2, 2]);
+    ctx.beginPath();
+    ctx.moveTo(x, 0);
+    ctx.lineTo(x, plotH);
+    ctx.stroke();
+    ctx.setLineDash([]);
+  }
+  ctx.textAlign = 'right';
+  ctx.fillStyle = '#555';
+  ctx.fillText('Hz', W - 2, H - 3);
+
+  // ── Centre line (nominal carrier — green dashed) ──────────────────────────
+  const centreX = binToX(n / 2);
+  if (centreX >= ML && centreX <= W) {
+    ctx.strokeStyle = '#3fb950';
+    ctx.lineWidth = 1;
+    ctx.setLineDash([3, 3]);
+    ctx.beginPath();
+    ctx.moveTo(centreX, 0);
+    ctx.lineTo(centreX, plotH);
+    ctx.stroke();
+    ctx.setLineDash([]);
+  }
+
+  // ── Peak marker (red solid) ───────────────────────────────────────────────
+  if (peakBin >= 0 && peakBin < n) {
+    const peakX = binToX(peakBin);
+    if (peakX >= ML && peakX <= W) {
+      ctx.strokeStyle = '#f85149';
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.moveTo(peakX, 0);
+      ctx.lineTo(peakX, plotH);
+      ctx.stroke();
+    }
     if (infoEl && s.current && s.current.valid) {
       const dHz = s.current.doppler_hz;
       const sign = dHz >= 0 ? '+' : '';
@@ -424,6 +603,12 @@ function drawMiniSpectrum(canvasId, s, stationIdx) {
       infoEl.style.color = 'var(--muted)';
     }
   }
+
+  // ── Axis border ───────────────────────────────────────────────────────────
+  ctx.strokeStyle = '#30363d';
+  ctx.lineWidth = 1;
+  ctx.setLineDash([]);
+  ctx.strokeRect(ML, 0, plotW, plotH);
 }
 
 // ---------------------------------------------------------------------------
@@ -880,6 +1065,7 @@ window.removeStation = async function(label) {
 // ---------------------------------------------------------------------------
 document.addEventListener('DOMContentLoaded', async () => {
   initCharts();
+  startSpecRenderLoop();
   await checkAuthStatus();
   await loadSettings();
   await loadStations();
