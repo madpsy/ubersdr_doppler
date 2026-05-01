@@ -1,5 +1,31 @@
-/* app.js — ubersdr_doppler web UI */
+/* app.js — ubersdr_doppler web UI
+ *
+ * Three-panel chart layout matching HamSCI Grape paper style:
+ *   Panel 1: Doppler shift (Hz offset) OR absolute received frequency (Hz)
+ *   Panel 2: SNR (dB)
+ *   Panel 3: Signal power (dBFS)
+ */
 'use strict';
+
+// ---------------------------------------------------------------------------
+// State
+// ---------------------------------------------------------------------------
+const state = {
+  stations: [],          // [{config, current, baseline_mean_hz, corrected_doppler_hz}]
+  dopplerChart: null,
+  snrChart: null,
+  powerChart: null,
+  chartDatasets: {},     // label → {doppler: idx, snr: idx, power: idx}
+  historyHours: 24,
+  showSNR: true,
+  showPower: true,
+  chartMode: 'doppler',  // 'doppler' | 'absolute'
+};
+
+const COLOURS = [
+  '#58a6ff', '#3fb950', '#f78166', '#d29922',
+  '#bc8cff', '#39d353', '#ff7b72', '#ffa657',
+];
 
 // ---------------------------------------------------------------------------
 // Global settings
@@ -10,6 +36,10 @@ async function loadSettings() {
     const s = await r.json();
     document.getElementById('s-callsign').value = s.callsign || '';
     document.getElementById('s-grid').value = s.grid || '';
+    const nodeEl = document.getElementById('s-node');
+    if (nodeEl) nodeEl.value = s.node_number || '';
+    const offsetEl = document.getElementById('s-manual-offset');
+    if (offsetEl) offsetEl.value = s.manual_offset_hz ?? 0;
     document.getElementById('s-freq-ref').value = s.frequency_reference || 'none';
     document.getElementById('s-ref-desc').value = s.reference_description || '';
     updateRefBanner(s.frequency_reference || 'none');
@@ -38,24 +68,6 @@ function updateRefBanner(freqRef) {
 }
 
 // ---------------------------------------------------------------------------
-// State
-// ---------------------------------------------------------------------------
-const state = {
-  stations: [],          // [{config, current}]
-  dopplerChart: null,
-  snrChart: null,
-  chartDatasets: {},     // label → {doppler: idx, snr: idx}
-  historyHours: 24,
-  showSNR: true,
-};
-
-// Colour palette — one colour per station, shared across both charts
-const COLOURS = [
-  '#58a6ff', '#3fb950', '#f78166', '#d29922',
-  '#bc8cff', '#39d353', '#ff7b72', '#ffa657',
-];
-
-// ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 function fmtHz(hz) {
@@ -75,19 +87,17 @@ function dopplerClass(hz) {
   return hz > 0 ? 'doppler-pos' : 'doppler-neg';
 }
 
-// Format a UTC timestamp as HH:MM:SS UTC
 function fmtUTC(ts) {
   if (!ts) return '—';
-  const d = new Date(ts);
-  return d.toISOString().slice(11, 19) + ' UTC';
+  return new Date(ts).toISOString().slice(11, 19) + ' UTC';
 }
 
 function colourForIndex(i) {
   return COLOURS[i % COLOURS.length];
 }
 
-function stationIndex(label) {
-  return state.stations.findIndex(s => s.config.label === label);
+function hasReference() {
+  return state.stations.some(s => s.config && s.config.is_reference);
 }
 
 async function apiFetch(path, opts = {}) {
@@ -112,23 +122,18 @@ function setConnStatus(status) {
 // ---------------------------------------------------------------------------
 // Status table
 // ---------------------------------------------------------------------------
-// Check if any station is marked as reference
-function hasReference() {
-  return state.stations.some(s => s.config.is_reference);
-}
-
 function renderStatusTable() {
   const tbody = document.getElementById('status-tbody');
   const thead = document.querySelector('#status-table thead tr');
   const showRef = hasReference();
 
-  // Update header to show/hide corrected column
   if (thead) {
     thead.innerHTML = `
       <th>Station</th>
       <th>Frequency</th>
       <th>Doppler (raw)</th>
       ${showRef ? '<th>Doppler (corrected)</th>' : ''}
+      <th>1h Baseline</th>
       <th>SNR</th>
       <th>Signal</th>
       <th>Noise Floor</th>
@@ -137,7 +142,7 @@ function renderStatusTable() {
   }
 
   if (state.stations.length === 0) {
-    const cols = showRef ? 9 : 8;
+    const cols = showRef ? 10 : 9;
     tbody.innerHTML = `<tr><td colspan="${cols}" class="loading">No stations configured — add one below.</td></tr>`;
     return;
   }
@@ -146,7 +151,7 @@ function renderStatusTable() {
     const r = s.current || {};
     const valid = r.valid;
     const colour = colourForIndex(i);
-    const isRef = s.config.is_reference;
+    const isRef = s.config && s.config.is_reference;
 
     const dHz   = valid ? fmtDoppler(r.doppler_hz) : '—';
     const cls   = valid ? dopplerClass(r.doppler_hz) : 'invalid';
@@ -158,13 +163,18 @@ function renderStatusTable() {
     let corrCell = '';
     if (showRef) {
       if (isRef) {
-        corrCell = '<td class="muted">— (reference)</td>';
+        corrCell = '<td style="color:var(--muted)">— (ref)</td>';
       } else if (s.corrected_doppler_hz !== null && s.corrected_doppler_hz !== undefined) {
         const cHz = s.corrected_doppler_hz;
         corrCell = `<td class="${dopplerClass(cHz)}">${fmtDoppler(cHz)}</td>`;
       } else {
         corrCell = '<td class="invalid">—</td>';
       }
+    }
+
+    let baselineCell = '<td style="color:var(--muted)">—</td>';
+    if (s.baseline_mean_hz !== null && s.baseline_mean_hz !== undefined) {
+      baselineCell = `<td style="color:var(--muted)">${fmtDoppler(s.baseline_mean_hz)}</td>`;
     }
 
     let stateTxt = '<span class="state-nosig">No signal</span>';
@@ -181,6 +191,7 @@ function renderStatusTable() {
       <td>${fmtHz(s.config.freq_hz)}</td>
       <td class="${cls}">${dHz}</td>
       ${corrCell}
+      ${baselineCell}
       <td>${snr}</td>
       <td>${sig}</td>
       <td>${noise}</td>
@@ -191,11 +202,10 @@ function renderStatusTable() {
 }
 
 // ---------------------------------------------------------------------------
-// Charts
+// Charts — three panels matching HamSCI Grape paper layout
 // ---------------------------------------------------------------------------
 
-// Shared x-axis config for both charts
-function xAxisConfig() {
+function xAxisConfig(showTitle) {
   return {
     type: 'time',
     time: {
@@ -205,12 +215,14 @@ function xAxisConfig() {
     },
     ticks: { color: '#8b949e', maxTicksLimit: 10, source: 'auto' },
     grid: { color: '#21262d' },
-    title: { display: true, text: 'UTC time', color: '#8b949e', font: { size: 11 } },
+    title: showTitle
+      ? { display: true, text: 'UTC time', color: '#8b949e', font: { size: 11 } }
+      : { display: false },
   };
 }
 
 function initCharts() {
-  // ── Doppler chart ──────────────────────────────────────────────────────
+  // ── Panel 1: Doppler / absolute frequency ─────────────────────────────────
   const dCtx = document.getElementById('doppler-chart').getContext('2d');
   state.dopplerChart = new Chart(dCtx, {
     type: 'line',
@@ -221,16 +233,17 @@ function initCharts() {
       maintainAspectRatio: false,
       interaction: { mode: 'index', intersect: false },
       scales: {
-        x: xAxisConfig(),
+        x: xAxisConfig(false),
         y: {
+          id: 'y',
           title: { display: true, text: 'Doppler shift (Hz)', color: '#8b949e', font: { size: 11 } },
           ticks: { color: '#8b949e' },
           grid: { color: '#21262d' },
-          // Zero reference line
           afterDataLimits(scale) {
-            // Ensure zero is always visible
-            if (scale.max < 0.5) scale.max = 0.5;
-            if (scale.min > -0.5) scale.min = -0.5;
+            if (state.chartMode === 'doppler') {
+              if (scale.max < 0.5) scale.max = 0.5;
+              if (scale.min > -0.5) scale.min = -0.5;
+            }
           },
         },
       },
@@ -238,14 +251,15 @@ function initCharts() {
         legend: { labels: { color: '#e6edf3', boxWidth: 12 } },
         tooltip: {
           callbacks: {
-            title: items => {
-              if (!items.length) return '';
-              return new Date(items[0].parsed.x).toISOString().slice(11, 19) + ' UTC';
+            title: items => items.length ? new Date(items[0].parsed.x).toISOString().slice(11, 19) + ' UTC' : '',
+            label: ctx => {
+              if (state.chartMode === 'absolute') {
+                return `${ctx.dataset.label}: ${ctx.parsed.y.toFixed(3)} Hz`;
+              }
+              return `${ctx.dataset.label}: ${fmtDoppler(ctx.parsed.y)}`;
             },
-            label: ctx => `${ctx.dataset.label}: ${fmtDoppler(ctx.parsed.y)}`,
           },
         },
-        // Zero reference line annotation (drawn manually via afterDraw plugin)
       },
     },
     plugins: [{
@@ -254,22 +268,37 @@ function initCharts() {
         const yScale = chart.scales.y;
         const xScale = chart.scales.x;
         if (!yScale || !xScale) return;
-        const y = yScale.getPixelForValue(0);
+        // In doppler mode: draw zero line. In absolute mode: draw nominal freq lines.
         const ctx = chart.ctx;
         ctx.save();
-        ctx.beginPath();
-        ctx.moveTo(xScale.left, y);
-        ctx.lineTo(xScale.right, y);
         ctx.strokeStyle = 'rgba(255,255,255,0.25)';
         ctx.lineWidth = 1;
         ctx.setLineDash([4, 4]);
-        ctx.stroke();
+        if (state.chartMode === 'doppler') {
+          const y = yScale.getPixelForValue(0);
+          ctx.beginPath();
+          ctx.moveTo(xScale.left, y);
+          ctx.lineTo(xScale.right, y);
+          ctx.stroke();
+        } else {
+          // Draw one nominal frequency line per station
+          state.stations.forEach(s => {
+            if (!s.config) return;
+            const y = yScale.getPixelForValue(s.config.freq_hz);
+            if (y >= yScale.top && y <= yScale.bottom) {
+              ctx.beginPath();
+              ctx.moveTo(xScale.left, y);
+              ctx.lineTo(xScale.right, y);
+              ctx.stroke();
+            }
+          });
+        }
         ctx.restore();
       },
     }],
   });
 
-  // ── SNR chart ──────────────────────────────────────────────────────────
+  // ── Panel 2: SNR ──────────────────────────────────────────────────────────
   const sCtx = document.getElementById('snr-chart').getContext('2d');
   state.snrChart = new Chart(sCtx, {
     type: 'line',
@@ -280,7 +309,7 @@ function initCharts() {
       maintainAspectRatio: false,
       interaction: { mode: 'index', intersect: false },
       scales: {
-        x: { ...xAxisConfig(), title: { display: false } },
+        x: xAxisConfig(false),
         y: {
           title: { display: true, text: 'SNR (dB)', color: '#8b949e', font: { size: 11 } },
           ticks: { color: '#8b949e' },
@@ -292,11 +321,38 @@ function initCharts() {
         legend: { display: false },
         tooltip: {
           callbacks: {
-            title: items => {
-              if (!items.length) return '';
-              return new Date(items[0].parsed.x).toISOString().slice(11, 19) + ' UTC';
-            },
+            title: items => items.length ? new Date(items[0].parsed.x).toISOString().slice(11, 19) + ' UTC' : '',
             label: ctx => `${ctx.dataset.label} SNR: ${ctx.parsed.y.toFixed(1)} dB`,
+          },
+        },
+      },
+    },
+  });
+
+  // ── Panel 3: Signal power (dBFS) ──────────────────────────────────────────
+  const pCtx = document.getElementById('power-chart').getContext('2d');
+  state.powerChart = new Chart(pCtx, {
+    type: 'line',
+    data: { datasets: [] },
+    options: {
+      animation: false,
+      responsive: true,
+      maintainAspectRatio: false,
+      interaction: { mode: 'index', intersect: false },
+      scales: {
+        x: xAxisConfig(true),
+        y: {
+          title: { display: true, text: 'Signal power (dBFS)', color: '#8b949e', font: { size: 11 } },
+          ticks: { color: '#8b949e' },
+          grid: { color: '#21262d' },
+        },
+      },
+      plugins: {
+        legend: { display: false },
+        tooltip: {
+          callbacks: {
+            title: items => items.length ? new Date(items[0].parsed.x).toISOString().slice(11, 19) + ' UTC' : '',
+            label: ctx => `${ctx.dataset.label}: ${ctx.parsed.y.toFixed(1)} dBFS`,
           },
         },
       },
@@ -304,69 +360,92 @@ function initCharts() {
   });
 }
 
+// Convert doppler_hz to chart Y value based on current mode
+function dopplerToY(dopplerHz, nominalFreqHz) {
+  if (state.chartMode === 'absolute') {
+    return nominalFreqHz + dopplerHz;
+  }
+  return dopplerHz;
+}
+
+function updateDopplerChartAxis() {
+  const chart = state.dopplerChart;
+  if (!chart) return;
+  const yAxis = chart.options.scales.y;
+  if (state.chartMode === 'absolute') {
+    yAxis.title.text = 'Received frequency (Hz)';
+  } else {
+    yAxis.title.text = 'Doppler shift (Hz)';
+  }
+  chart.update('none');
+}
+
 async function loadHistory() {
   const cutoff = Date.now() - state.historyHours * 3600 * 1000;
   state.dopplerChart.data.datasets = [];
   state.snrChart.data.datasets = [];
+  state.powerChart.data.datasets = [];
   state.chartDatasets = {};
 
   for (let i = 0; i < state.stations.length; i++) {
-    const label = state.stations[i].config.label;
+    const s = state.stations[i];
+    const label = s.config.label;
+    const nominalHz = s.config.freq_hz;
     const colour = colourForIndex(i);
     try {
       const r = await apiFetch(`/api/history?station=${encodeURIComponent(label)}`);
       const history = await r.json() || [];
       const filtered = history.filter(m => new Date(m.timestamp).getTime() >= cutoff);
 
-      const dopplerPoints = filtered.map(m => ({ x: new Date(m.timestamp), y: m.doppler_hz }));
+      const dopplerPoints = filtered.map(m => ({ x: new Date(m.timestamp), y: dopplerToY(m.doppler_hz, nominalHz) }));
       const snrPoints     = filtered.map(m => ({ x: new Date(m.timestamp), y: m.snr_db }));
+      const powerPoints   = filtered.map(m => ({ x: new Date(m.timestamp), y: m.signal_dbfs }));
 
       const dIdx = state.dopplerChart.data.datasets.length;
       state.dopplerChart.data.datasets.push({
-        label,
-        data: dopplerPoints,
-        borderColor: colour,
-        backgroundColor: 'transparent',
-        borderWidth: 1.5,
-        pointRadius: 0,
-        tension: 0.15,
-        spanGaps: false, // gaps where no valid reading = visible break
+        label, data: dopplerPoints,
+        borderColor: colour, backgroundColor: 'transparent',
+        borderWidth: 1.5, pointRadius: 0, tension: 0.15, spanGaps: false,
       });
 
       const sIdx = state.snrChart.data.datasets.length;
       state.snrChart.data.datasets.push({
-        label,
-        data: snrPoints,
-        borderColor: colour,
-        backgroundColor: colour + '22',
-        fill: true,
-        borderWidth: 1,
-        pointRadius: 0,
-        tension: 0.15,
-        spanGaps: false,
+        label, data: snrPoints,
+        borderColor: colour, backgroundColor: colour + '22', fill: true,
+        borderWidth: 1, pointRadius: 0, tension: 0.15, spanGaps: false,
       });
 
-      state.chartDatasets[label] = { doppler: dIdx, snr: sIdx };
+      const pIdx = state.powerChart.data.datasets.length;
+      state.powerChart.data.datasets.push({
+        label, data: powerPoints,
+        borderColor: colour, backgroundColor: colour + '22', fill: true,
+        borderWidth: 1, pointRadius: 0, tension: 0.15, spanGaps: false,
+      });
+
+      state.chartDatasets[label] = { doppler: dIdx, snr: sIdx, power: pIdx };
     } catch (e) {
       console.warn('history load failed for', label, e);
     }
   }
 
+  updateDopplerChartAxis();
   state.dopplerChart.update('none');
   state.snrChart.update('none');
+  state.powerChart.update('none');
 }
 
-// Append a live 1-second reading to both charts.
 function appendLivePoint(label, reading) {
-  const i = stationIndex(label);
+  const i = state.stations.findIndex(s => s.config && s.config.label === label);
+  const s = i >= 0 ? state.stations[i] : null;
+  const nominalHz = s ? s.config.freq_hz : 0;
   const colour = colourForIndex(i >= 0 ? i : state.dopplerChart.data.datasets.length);
   const cutoff = Date.now() - state.historyHours * 3600 * 1000;
   const ts = new Date(reading.timestamp);
 
-  // Ensure datasets exist
   if (state.chartDatasets[label] === undefined) {
     const dIdx = state.dopplerChart.data.datasets.length;
     const sIdx = state.snrChart.data.datasets.length;
+    const pIdx = state.powerChart.data.datasets.length;
     state.dopplerChart.data.datasets.push({
       label, data: [], borderColor: colour, backgroundColor: 'transparent',
       borderWidth: 1.5, pointRadius: 0, tension: 0.15, spanGaps: false,
@@ -375,33 +454,31 @@ function appendLivePoint(label, reading) {
       label, data: [], borderColor: colour, backgroundColor: colour + '22',
       fill: true, borderWidth: 1, pointRadius: 0, tension: 0.15, spanGaps: false,
     });
-    state.chartDatasets[label] = { doppler: dIdx, snr: sIdx };
+    state.powerChart.data.datasets.push({
+      label, data: [], borderColor: colour, backgroundColor: colour + '22',
+      fill: true, borderWidth: 1, pointRadius: 0, tension: 0.15, spanGaps: false,
+    });
+    state.chartDatasets[label] = { doppler: dIdx, snr: sIdx, power: pIdx };
   }
 
-  const { doppler: dIdx, snr: sIdx } = state.chartDatasets[label];
+  const { doppler: dIdx, snr: sIdx, power: pIdx } = state.chartDatasets[label];
   const dDs = state.dopplerChart.data.datasets[dIdx];
   const sDs = state.snrChart.data.datasets[sIdx];
+  const pDs = state.powerChart.data.datasets[pIdx];
 
-  if (reading.valid) {
-    dDs.data.push({ x: ts, y: reading.doppler_hz });
-    sDs.data.push({ x: ts, y: reading.snr_db });
-  }
-  // Always push a null point when invalid so spanGaps=false creates a visible gap
-  // (Chart.js skips null values, creating a break in the line)
-  else {
-    dDs.data.push({ x: ts, y: null });
-    sDs.data.push({ x: ts, y: null });
-  }
+  const yVal = reading.valid ? dopplerToY(reading.doppler_hz, nominalHz) : null;
+  dDs.data.push({ x: ts, y: yVal });
+  sDs.data.push({ x: ts, y: reading.valid ? reading.snr_db : null });
+  pDs.data.push({ x: ts, y: reading.valid ? reading.signal_dbfs : null });
 
-  // Trim old points
   const trimDs = ds => {
     while (ds.data.length > 0 && ds.data[0].x.getTime() < cutoff) ds.data.shift();
   };
-  trimDs(dDs);
-  trimDs(sDs);
+  trimDs(dDs); trimDs(sDs); trimDs(pDs);
 
   state.dopplerChart.update('none');
   state.snrChart.update('none');
+  state.powerChart.update('none');
 }
 
 // ---------------------------------------------------------------------------
@@ -416,7 +493,7 @@ function connectSSE() {
   es.onmessage = e => {
     try {
       const { station, reading } = JSON.parse(e.data);
-      const s = state.stations.find(x => x.config.label === station);
+      const s = state.stations.find(x => x.config && x.config.label === station);
       if (s) {
         s.current = reading;
         renderStatusTable();
@@ -447,13 +524,14 @@ function renderStationList() {
     const cfg = s.config;
     const colour = colourForIndex(i);
     const dis = cfg.enabled ? '' : ' station-disabled';
+    const refNote = cfg.is_reference ? ' · <span style="color:var(--yellow)">reference</span>' : '';
     return `<div class="station-card${dis}" data-id="${cfg.id}">
       <div class="station-info">
         <span class="station-name">
           <span class="station-dot" style="background:${colour}"></span>
-          ${cfg.label}
+          ${cfg.label}${cfg.is_reference ? ' <span class="ref-badge">REF</span>' : ''}
         </span>
-        <span class="station-meta">${fmtHz(cfg.freq_hz)} · SNR ≥ ${cfg.min_snr} dB · ±${cfg.max_drift_hz} Hz · ${cfg.enabled ? 'enabled' : 'disabled'}${cfg.callsign ? ' · ' + cfg.callsign : ''}${cfg.grid ? ' · ' + cfg.grid : ''}</span>
+        <span class="station-meta">${fmtHz(cfg.freq_hz)} · SNR ≥ ${cfg.min_snr} dB · ±${cfg.max_drift_hz} Hz · ${cfg.enabled ? 'enabled' : 'disabled'}${refNote}${cfg.callsign ? ' · ' + cfg.callsign : ''}${cfg.grid ? ' · ' + cfg.grid : ''}</span>
       </div>
       <div class="station-actions">
         <button class="btn btn-secondary btn-sm" onclick="editStation('${cfg.id}')">Edit</button>
@@ -491,10 +569,8 @@ function openModal(title, cfg = {}) {
   document.getElementById('f-max-drift').value = cfg.max_drift_hz ?? 100;
   document.getElementById('f-enabled').checked = cfg.enabled !== false;
   document.getElementById('f-reference').checked = cfg.is_reference === true;
-  // Show preset row only when adding a new station
   const presetRow = document.getElementById('preset-row');
   if (presetRow) presetRow.style.display = isEdit ? 'none' : '';
-  // Reset preset selector
   const presetSel = document.getElementById('f-preset');
   if (presetSel) presetSel.value = '';
   document.getElementById('modal').classList.remove('hidden');
@@ -506,7 +582,7 @@ function closeModal() {
 }
 
 window.editStation = function(id) {
-  const s = state.stations.find(x => x.config.id === id);
+  const s = state.stations.find(x => x.config && x.config.id === id);
   if (s) openModal('Edit Station', s.config);
 };
 
@@ -556,9 +632,13 @@ document.addEventListener('DOMContentLoaded', async () => {
   if (settingsForm) {
     settingsForm.addEventListener('submit', async e => {
       e.preventDefault();
+      const nodeEl = document.getElementById('s-node');
+      const offsetEl = document.getElementById('s-manual-offset');
       const s = {
         callsign:              document.getElementById('s-callsign').value.trim(),
         grid:                  document.getElementById('s-grid').value.trim(),
+        node_number:           nodeEl ? nodeEl.value.trim() : '',
+        manual_offset_hz:      offsetEl ? parseFloat(offsetEl.value) || 0 : 0,
         frequency_reference:   document.getElementById('s-freq-ref').value,
         reference_description: document.getElementById('s-ref-desc').value.trim(),
       };
@@ -583,44 +663,60 @@ document.addEventListener('DOMContentLoaded', async () => {
     });
   }
 
-  // ── Modal: hide preset row when editing ──────────────────────────────────
-  // (openModal shows/hides preset-row based on whether id is set)
-
-  // Hours selector
+  // ── Hours selector ───────────────────────────────────────────────────────
   document.getElementById('hours-select').addEventListener('change', async e => {
     state.historyHours = parseInt(e.target.value, 10);
     await loadHistory();
   });
 
-  // SNR chart toggle
+  // ── Chart mode (doppler / absolute frequency) ────────────────────────────
+  const chartModeEl = document.getElementById('chart-mode');
+  if (chartModeEl) {
+    chartModeEl.addEventListener('change', async e => {
+      state.chartMode = e.target.value;
+      await loadHistory();
+    });
+  }
+
+  // ── SNR chart toggle ─────────────────────────────────────────────────────
   document.getElementById('show-snr-chart').addEventListener('change', e => {
     state.showSNR = e.target.checked;
-    const wrap = document.getElementById('snr-chart-wrap');
-    wrap.style.display = state.showSNR ? '' : 'none';
+    document.getElementById('snr-chart-wrap').style.display = state.showSNR ? '' : 'none';
   });
 
-  // Add button
+  // ── Power chart toggle ───────────────────────────────────────────────────
+  const showPowerEl = document.getElementById('show-power-chart');
+  if (showPowerEl) {
+    showPowerEl.addEventListener('change', e => {
+      state.showPower = e.target.checked;
+      const wrap = document.getElementById('power-chart-wrap');
+      if (wrap) wrap.style.display = state.showPower ? '' : 'none';
+    });
+  }
+
+  // ── Add button ───────────────────────────────────────────────────────────
   document.getElementById('add-btn').addEventListener('click', () => openModal('Add Station'));
 
-  // Modal cancel
+  // ── Modal cancel ─────────────────────────────────────────────────────────
   document.getElementById('modal-cancel').addEventListener('click', closeModal);
   document.getElementById('modal').addEventListener('click', e => {
     if (e.target === document.getElementById('modal')) closeModal();
   });
 
-  // Station form submit
+  // ── Station form submit ───────────────────────────────────────────────────
   document.getElementById('station-form').addEventListener('submit', async e => {
     e.preventDefault();
     const id = document.getElementById('f-id').value;
     const cfg = {
       id,
-      label:       document.getElementById('f-label').value.trim(),
-      freq_hz:     parseInt(document.getElementById('f-freq').value, 10),
-      callsign:    document.getElementById('f-callsign').value.trim(),
-      grid:        document.getElementById('f-grid').value.trim(),
-      min_snr:     parseFloat(document.getElementById('f-min-snr').value),
+      label:        document.getElementById('f-label').value.trim(),
+      freq_hz:      parseInt(document.getElementById('f-freq').value, 10),
+      callsign:     document.getElementById('f-callsign').value.trim(),
+      grid:         document.getElementById('f-grid').value.trim(),
+      min_snr:      parseFloat(document.getElementById('f-min-snr').value),
       max_drift_hz: parseFloat(document.getElementById('f-max-drift').value),
-      enabled:     document.getElementById('f-enabled').checked,
+      enabled:      document.getElementById('f-enabled').checked,
+      is_reference: document.getElementById('f-reference').checked,
     };
     try {
       const endpoint = id ? '/api/stations/update' : '/api/stations/add';
@@ -637,7 +733,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     }
   });
 
-  // CSV download
+  // ── CSV download ──────────────────────────────────────────────────────────
   document.getElementById('dl-btn').addEventListener('click', () => {
     const station = document.getElementById('dl-station').value;
     const date    = document.getElementById('dl-date').value;

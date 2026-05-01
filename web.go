@@ -191,9 +191,13 @@ func startHTTPServer(
 			Current          DopplerReading `json:"current"`
 			BaselineMean     *float64       `json:"baseline_mean_hz"`     // 1-hour mean; nil if insufficient data
 			BaselineN        int            `json:"baseline_n"`           // number of minute-means in baseline
-			CorrectedDoppler *float64       `json:"corrected_doppler_hz"` // current - reference; nil if no reference
+			CorrectedDoppler *float64       `json:"corrected_doppler_hz"` // current - reference - manual_offset; nil if no correction active
 		}
 		refHz, refValid := mgr.referenceCorrection()
+		settingsMu.RLock()
+		manualOffset := settings.ManualOffsetHz
+		settingsMu.RUnlock()
+
 		stations := mgr.list()
 		out := make([]stationStatus, 0, len(stations))
 		for _, ds := range stations {
@@ -204,9 +208,17 @@ func startHTTPServer(
 			}
 			cur := ds.CurrentReading()
 			var corrPtr *float64
-			if refValid && cur.Valid && !ds.cfg.IsReference {
-				corr := cur.DopplerHz - refHz
-				corrPtr = &corr
+			if cur.Valid && !ds.cfg.IsReference {
+				// Apply reference correction (if available) and manual offset
+				corr := cur.DopplerHz
+				if refValid {
+					corr -= refHz
+				}
+				corr -= manualOffset
+				// Only set corrPtr if at least one correction is active
+				if refValid || manualOffset != 0 {
+					corrPtr = &corr
+				}
 			}
 			out = append(out, stationStatus{
 				Config:           ds.cfg,

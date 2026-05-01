@@ -166,7 +166,12 @@ func (ds *DopplerStation) run(ctx context.Context) {
 			ds.current = reading
 			ds.mu.Unlock()
 
-			// Accumulate for minute-mean.
+			// Write 1-second reading to Grape-format CSV (only valid readings).
+			if reading.Valid {
+				ds.csvWriter.writeReading(ds.cfg, reading)
+			}
+
+			// Accumulate for minute-mean history (used by the web UI chart).
 			if reading.Valid {
 				ds.sampleMu.Lock()
 				ds.samples = append(ds.samples, reading)

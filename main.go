@@ -148,6 +148,11 @@ type globalSettings struct {
 	Callsign string `json:"callsign"` // Amateur radio callsign, e.g. "G0XYZ"
 	Grid     string `json:"grid"`     // Maidenhead grid locator, e.g. "IO91wm"
 
+	// HamSCI Grape node number — assigned by HamSCI for registered stations
+	// Format: "N00001" (6 chars). Leave empty if not registered.
+	// Register at: https://hamsci.org/grape-node-registration
+	NodeNumber string `json:"node_number"`
+
 	// Frequency reference type — affects CSV quality flag and UI display
 	// Values: "none", "gpsdo", "reference_station"
 	FrequencyReference FrequencyReferenceType `json:"frequency_reference"`
@@ -155,6 +160,13 @@ type globalSettings struct {
 	// Optional description of the reference (for documentation and CSV metadata)
 	// Examples: "Leo Bodnar GPSDO on 10 MHz", "Trimble Thunderbolt", "Leaky 10 MHz OCXO"
 	ReferenceDescription string `json:"reference_description"`
+
+	// ManualOffsetHz is a static frequency correction applied to all station readings.
+	// Use this when you know your hardware clock is off by a fixed amount (e.g. measured
+	// against a known reference). This is subtracted from all Doppler readings.
+	// Set to 0 to disable. Typical values: -50 to +50 Hz.
+	// This correction is applied in addition to any reference station correction.
+	ManualOffsetHz float64 `json:"manual_offset_hz"`
 }
 
 // defaultGlobalSettings returns sensible defaults.
