@@ -15,6 +15,10 @@ const BASE = (window.BASE_PATH || '').replace(/\/$/, '');
 // ---------------------------------------------------------------------------
 // State
 // ---------------------------------------------------------------------------
+// Unique token for this browser tab's SSE connection — lets the server
+// identify which SSE client to update when the spectrum interval changes.
+const SSE_CLIENT_TOKEN = (crypto.randomUUID ? crypto.randomUUID() : Math.random().toString(36).slice(2));
+
 const state = {
   stations: [],          // [{config, current, baseline_mean_hz, corrected_doppler_hz}]
   chartDate: '',         // YYYY-MM-DD UTC date filter for history chart ('' = live rolling window)
@@ -27,6 +31,7 @@ const state = {
   showPower: true,
   showRef: false,    // show reference station on history charts (off by default)
   chartMode: 'doppler',  // 'doppler' | 'absolute'
+  specIntervalS: 2,      // spectrum push interval in seconds (1–5)
   auth: {
     passwordConfigured: false,
     authenticated: false,
@@ -1023,7 +1028,7 @@ function connectSSE() {
 
   function connect() {
     setConnStatus('connecting');
-    const es = new EventSource(BASE + '/api/events');
+    const es = new EventSource(BASE + '/api/events?client_token=' + encodeURIComponent(SSE_CLIENT_TOKEN));
 
     // Named events from the server — set connected on any of these
     es.addEventListener('connected',  () => { retryDelay = 1000; setConnStatus('connected'); });
@@ -1251,6 +1256,23 @@ window.removeStation = async function(label) {
 // ---------------------------------------------------------------------------
 // Init
 // ---------------------------------------------------------------------------
+// Send the chosen spectrum interval to the server for this SSE connection.
+async function applySpecInterval(intervalS) {
+  state.specIntervalS = intervalS;
+  try {
+    localStorage.setItem('specIntervalS', String(intervalS));
+  } catch (_) {}
+  try {
+    await apiFetch('/api/spectrum-interval', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ interval_s: intervalS, client_token: SSE_CLIENT_TOKEN }),
+    });
+  } catch (e) {
+    console.warn('spectrum interval update failed:', e);
+  }
+}
+
 document.addEventListener('DOMContentLoaded', async () => {
   initCharts();
   startSpecRenderLoop();
@@ -1259,6 +1281,22 @@ document.addEventListener('DOMContentLoaded', async () => {
   await loadStations();
   await loadHistory();
   connectSSE();
+
+  // Restore saved spectrum interval preference
+  const savedInterval = parseInt(localStorage.getItem('specIntervalS') || '2', 10);
+  const validIntervals = [1, 2, 3, 4, 5];
+  state.specIntervalS = validIntervals.includes(savedInterval) ? savedInterval : 2;
+  const specIntervalEl = document.getElementById('spec-interval-select');
+  if (specIntervalEl) {
+    specIntervalEl.value = String(state.specIntervalS);
+    specIntervalEl.addEventListener('change', e => {
+      const v = parseInt(e.target.value, 10);
+      if (validIntervals.includes(v)) applySpecInterval(v);
+    });
+  }
+  // Push the saved preference to the server once the SSE connection is live.
+  // We wait a short moment so the SSE client is registered in the hub.
+  setTimeout(() => applySpecInterval(state.specIntervalS), 1500);
 
   // ── Auth buttons ─────────────────────────────────────────────────────────
   const authBtn = document.getElementById('auth-btn');

@@ -221,17 +221,6 @@ func (h *sseHub) broadcastSpectrum(label string, bins []float32, peakBin int, bi
 	}
 }
 
-// setClientSpecInterval updates the spectrum push interval for all clients
-// on the given SSE connection. interval must be 1–5 seconds.
-func (h *sseHub) setClientSpecInterval(c *sseClient, interval time.Duration) {
-	h.mu.Lock()
-	if _, ok := h.clients[c]; ok {
-		c.specInterval = interval
-		c.lastSpec = time.Time{} // reset so next frame is sent immediately
-	}
-	h.mu.Unlock()
-}
-
 // ---------------------------------------------------------------------------
 // HTTP server
 // ---------------------------------------------------------------------------

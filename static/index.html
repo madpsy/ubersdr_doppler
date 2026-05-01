@@ -121,7 +121,20 @@
 
     <!-- Mini spectrum display — one canvas per station showing the 1 kHz window -->
     <section id="spectrum-section">
-      <h2>Signal Lock</h2>
+      <div class="chart-header">
+        <h2>Signal Lock</h2>
+        <div class="chart-controls">
+          <label>Update rate:
+            <select id="spec-interval-select">
+              <option value="1">1 s</option>
+              <option value="2" selected>2 s</option>
+              <option value="3">3 s</option>
+              <option value="4">4 s</option>
+              <option value="5">5 s</option>
+            </select>
+          </label>
+        </div>
+      </div>
       <p class="chart-hint" style="margin-bottom:12px"><span id="hint-window-spec2">…</span> centred on each carrier. <span style="color:var(--green)">Green dashed</span> = nominal frequency. <span style="color:#f85149">Red marker</span> = detected peak (power-weighted centroid, ~0.01 Hz precision at high SNR). Scroll to zoom · drag to pan · double-click to reset.</p>
       <div id="mini-spectra"></div>
     </section>
