@@ -394,15 +394,21 @@ const AudioAnalysisModal = (() => {
     // Helper: bin index → X pixel within [ML, ML+plotW]
     const binToX = i => ML + ((i - binLow) / (numBins - 1)) * plotW;
 
-    // dB range over passband bins only — use smoothed bounds so the axis
-    // doesn't jump every frame as the instantaneous min/max fluctuates.
-    let minDB = Infinity, maxDB = -Infinity;
+    // dB range over passband bins — use percentiles rather than min/max so that
+    // a handful of very quiet or very loud outlier bins don't distort the scale.
+    // 10th percentile → noise floor estimate; 95th percentile → peak estimate.
+    const visibleVals = [];
     for (let i = binLow; i <= binHigh; i++) {
-      if (!isFinite(smoothMag[i])) continue;
-      if (smoothMag[i] < minDB) minDB = smoothMag[i];
-      if (smoothMag[i] > maxDB) maxDB = smoothMag[i];
+      if (isFinite(smoothMag[i])) visibleVals.push(smoothMag[i]);
     }
-    if (!isFinite(minDB)) { minDB = -120; maxDB = -40; }
+    let minDB = -120, maxDB = -40;
+    if (visibleVals.length > 0) {
+      visibleVals.sort((a, b) => a - b);
+      const p10idx = Math.floor(visibleVals.length * 0.10);
+      const p95idx = Math.min(visibleVals.length - 1, Math.floor(visibleVals.length * 0.95));
+      minDB = visibleVals[p10idx];
+      maxDB = visibleVals[p95idx];
+    }
 
     // Bootstrap smoothed bounds on first valid frame
     if (dbFloorSmooth === null) { dbFloorSmooth = minDB; dbCeilSmooth = maxDB; }
@@ -419,11 +425,10 @@ const AudioAnalysisModal = (() => {
       dbCeilSmooth = dbCeilSmooth * (1 - SCALE_SHRINK_ALPHA) + maxDB * SCALE_SHRINK_ALPHA;
     }
 
-    // Snap to 10 dB-rounded boundaries for clean grid lines, but only move
-    // the boundary when the smoothed value crosses the current rounded edge
-    // (avoids the axis ticking up/down by 10 dB on every frame).
-    const dbFloor = Math.floor(dbFloorSmooth / 10) * 10;
-    const dbCeil  = Math.ceil(dbCeilSmooth  / 10) * 10;
+    // Snap to 10 dB-rounded boundaries for clean grid lines.
+    // Add 10 dB headroom above the peak and 10 dB below the noise floor.
+    const dbFloor = Math.floor(dbFloorSmooth / 10) * 10 - 10;
+    const dbCeil  = Math.ceil(dbCeilSmooth  / 10) * 10 + 10;
     const dbRange = dbCeil - dbFloor || 10;
     const dbToY   = db => plotH - ((db - dbFloor) / dbRange) * plotH;
 
