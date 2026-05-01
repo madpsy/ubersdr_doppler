@@ -425,9 +425,9 @@ const AudioAnalysisModal = (() => {
       dbCeilSmooth = dbCeilSmooth * (1 - SCALE_SHRINK_ALPHA) + peakDB * SCALE_SHRINK_ALPHA;
     }
 
-    // Axis bounds: noise floor sits ~20% from the bottom; 10 dB headroom above peak.
-    const dbFloor = Math.floor(dbFloorSmooth / 10) * 10 - 10;
-    const dbCeil  = Math.ceil(dbCeilSmooth   / 10) * 10 + 10;
+    // Axis bounds: noise floor pushed well below the median; minimal headroom above peak.
+    const dbFloor = Math.floor(dbFloorSmooth / 10) * 10 - 20;
+    const dbCeil  = Math.ceil(dbCeilSmooth   / 10) * 10 + 5;
     const dbRange = dbCeil - dbFloor || 10;
     const dbToY   = db => plotH - ((db - dbFloor) / dbRange) * plotH;
 
