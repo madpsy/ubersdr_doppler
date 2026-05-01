@@ -1,6 +1,6 @@
 /* app.js — ubersdr_doppler web UI
  *
- * Three-panel chart layout matching HamSCI Grape paper style:
+ * Three-panel chart layout:
  *   Panel 1: Doppler shift (Hz offset) OR absolute received frequency (Hz)
  *   Panel 2: SNR (dB)
  *   Panel 3: Signal power (dBFS)
@@ -24,6 +24,7 @@ const state = {
   historyHours: 24,
   showSNR: true,
   showPower: true,
+  showRef: false,    // show reference station on history charts (off by default)
   chartMode: 'doppler',  // 'doppler' | 'absolute'
   auth: {
     passwordConfigured: false,
@@ -136,8 +137,6 @@ async function loadSettings() {
     const s = await r.json();
     document.getElementById('s-callsign').value = s.callsign || '';
     document.getElementById('s-grid').value = s.grid || '';
-    const nodeEl = document.getElementById('s-node');
-    if (nodeEl) nodeEl.value = s.node_number || '';
     const offsetEl = document.getElementById('s-manual-offset');
     if (offsetEl) offsetEl.value = s.manual_offset_hz ?? 0;
     document.getElementById('s-freq-ref').value = s.frequency_reference || 'none';
@@ -155,11 +154,11 @@ function updateRefBanner(freqRef) {
   switch (freqRef) {
     case 'gpsdo':
       el.classList.add('banner-gpsdo');
-      el.textContent = '✓ GPSDO — GPS-disciplined oscillator. Absolute Doppler values are accurate to ~0.01 Hz. Data is suitable for HamSCI submission.';
+      el.textContent = '✓ GPSDO — GPS-disciplined oscillator. Absolute Doppler values are accurate to ~0.01 Hz.';
       break;
     case 'reference_station':
       el.classList.add('banner-refstat');
-      el.textContent = '⚡ Reference station correction active. Hardware clock drift is cancelled in real time using the reference station signal. Mark one station as "Reference station" below.';
+      el.textContent = '⚡ Reference station correction active. Hardware clock drift is cancelled in real time using the reference station signal. Mark one station as "Reference station" above.';
       break;
     default:
       el.classList.add('banner-none');
@@ -226,6 +225,10 @@ function renderStatusTable() {
   const tbody = document.getElementById('status-tbody');
   const thead = document.querySelector('#status-table thead tr');
   const showRef = hasReference();
+
+  // Show/hide the "Reference" chart checkbox based on whether a ref station exists
+  const refLabel = document.getElementById('show-ref-label');
+  if (refLabel) refLabel.style.display = showRef ? '' : 'none';
 
   if (thead) {
     thead.innerHTML = `
@@ -796,8 +799,11 @@ function updateDopplerChartAxis() {
   const chart = state.dopplerChart;
   if (!chart) return;
   const yAxis = chart.options.scales.y;
+  const corrected = hasReference();
   if (state.chartMode === 'absolute') {
     yAxis.title.text = 'Received frequency (Hz)';
+  } else if (corrected) {
+    yAxis.title.text = 'Doppler shift — corrected (Hz)';
   } else {
     yAxis.title.text = 'Doppler shift (Hz)';
   }
@@ -813,6 +819,8 @@ async function loadHistory() {
 
   for (let i = 0; i < state.stations.length; i++) {
     const s = state.stations[i];
+    // Skip reference station unless the user has opted in
+    if (s.config.is_reference && !state.showRef) continue;
     const label = s.config.label;
     const nominalHz = s.config.freq_hz;
     const colour = colourForIndex(i);
@@ -821,7 +829,12 @@ async function loadHistory() {
       const history = await r.json() || [];
       const filtered = history.filter(m => new Date(m.timestamp).getTime() >= cutoff);
 
-      const dopplerPoints = filtered.map(m => ({ x: new Date(m.timestamp), y: dopplerToY(m.doppler_hz, nominalHz) }));
+      // Use corrected Doppler when available (reference station offset applied)
+      const dopplerPoints = filtered.map(m => {
+        const hz = (m.corrected_doppler_hz !== null && m.corrected_doppler_hz !== undefined)
+          ? m.corrected_doppler_hz : m.doppler_hz;
+        return { x: new Date(m.timestamp), y: dopplerToY(hz, nominalHz) };
+      });
       const snrPoints     = filtered.map(m => ({ x: new Date(m.timestamp), y: m.snr_db }));
       const powerPoints   = filtered.map(m => ({ x: new Date(m.timestamp), y: m.signal_dbfs }));
 
@@ -861,6 +874,8 @@ async function loadHistory() {
 function appendLivePoint(label, reading) {
   const i = state.stations.findIndex(s => s.config && s.config.label === label);
   const s = i >= 0 ? state.stations[i] : null;
+  // Skip reference station on charts unless user opted in
+  if (s && s.config.is_reference && !state.showRef) return;
   const nominalHz = s ? s.config.freq_hz : 0;
   const colour = colourForIndex(i >= 0 ? i : state.dopplerChart.data.datasets.length);
   const cutoff = Date.now() - state.historyHours * 3600 * 1000;
@@ -890,7 +905,10 @@ function appendLivePoint(label, reading) {
   const sDs = state.snrChart.data.datasets[sIdx];
   const pDs = state.powerChart.data.datasets[pIdx];
 
-  const yVal = reading.valid ? dopplerToY(reading.doppler_hz, nominalHz) : null;
+  // Use corrected Doppler when available (reference station offset applied)
+  const dHz = (reading.corrected_doppler_hz !== null && reading.corrected_doppler_hz !== undefined)
+    ? reading.corrected_doppler_hz : reading.doppler_hz;
+  const yVal = reading.valid ? dopplerToY(dHz, nominalHz) : null;
   dDs.data.push({ x: ts, y: yVal });
   sDs.data.push({ x: ts, y: reading.valid ? reading.snr_db : null });
   pDs.data.push({ x: ts, y: reading.valid ? reading.signal_dbfs : null });
@@ -1172,12 +1190,10 @@ document.addEventListener('DOMContentLoaded', async () => {
   if (settingsForm) {
     settingsForm.addEventListener('submit', async e => {
       e.preventDefault();
-      const nodeEl = document.getElementById('s-node');
       const offsetEl = document.getElementById('s-manual-offset');
       const s = {
         callsign:              document.getElementById('s-callsign').value.trim(),
         grid:                  document.getElementById('s-grid').value.trim(),
-        node_number:           nodeEl ? nodeEl.value.trim() : '',
         manual_offset_hz:      offsetEl ? parseFloat(offsetEl.value) || 0 : 0,
         frequency_reference:   document.getElementById('s-freq-ref').value,
         reference_description: document.getElementById('s-ref-desc').value.trim(),
@@ -1231,6 +1247,16 @@ document.addEventListener('DOMContentLoaded', async () => {
       state.showPower = e.target.checked;
       const wrap = document.getElementById('power-chart-wrap');
       if (wrap) wrap.style.display = state.showPower ? '' : 'none';
+    });
+  }
+
+  // ── Reference station chart toggle ───────────────────────────────────────
+  const showRefEl = document.getElementById('show-ref-station');
+  if (showRefEl) {
+    showRefEl.addEventListener('change', e => {
+      state.showRef = e.target.checked;
+      // Reload history charts to add/remove reference station dataset
+      loadHistory();
     });
   }
 

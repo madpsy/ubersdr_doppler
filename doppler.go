@@ -41,22 +41,24 @@ import (
 
 // DopplerReading is a single 1-second Doppler measurement for one station.
 type DopplerReading struct {
-	Timestamp  time.Time `json:"timestamp"`
-	DopplerHz  float64   `json:"doppler_hz"`  // measured carrier offset from nominal (Hz)
-	SNR        float32   `json:"snr_db"`      // signal-to-noise ratio (dB)
-	SignalDBFS float32   `json:"signal_dbfs"` // peak signal power (dBFS)
-	NoiseDBFS  float32   `json:"noise_dbfs"`  // noise floor (dBFS)
-	Valid      bool      `json:"valid"`       // false if SNR < minSNR or no signal
+	Timestamp          time.Time `json:"timestamp"`
+	DopplerHz          float64   `json:"doppler_hz"`                     // measured carrier offset from nominal (Hz)
+	CorrectedDopplerHz *float64  `json:"corrected_doppler_hz,omitempty"` // nil if no reference station
+	SNR                float32   `json:"snr_db"`                         // signal-to-noise ratio (dB)
+	SignalDBFS         float32   `json:"signal_dbfs"`                    // peak signal power (dBFS)
+	NoiseDBFS          float32   `json:"noise_dbfs"`                     // noise floor (dBFS)
+	Valid              bool      `json:"valid"`                          // false if SNR < minSNR or no signal
 }
 
 // MinuteMean is the 1-minute mean of valid DopplerReadings.
 type MinuteMean struct {
-	Timestamp  time.Time `json:"timestamp"`
-	DopplerHz  float64   `json:"doppler_hz"`
-	SNR        float32   `json:"snr_db"`
-	SignalDBFS float32   `json:"signal_dbfs"`
-	NoiseDBFS  float32   `json:"noise_dbfs"`
-	Count      int       `json:"count"` // number of valid samples averaged
+	Timestamp          time.Time `json:"timestamp"`
+	DopplerHz          float64   `json:"doppler_hz"`
+	CorrectedDopplerHz *float64  `json:"corrected_doppler_hz,omitempty"` // nil if no reference station
+	SNR                float32   `json:"snr_db"`
+	SignalDBFS         float32   `json:"signal_dbfs"`
+	NoiseDBFS          float32   `json:"noise_dbfs"`
+	Count              int       `json:"count"` // number of valid samples averaged
 }
 
 // ---------------------------------------------------------------------------
@@ -628,6 +630,14 @@ func (ds *DopplerStation) runSpectrumLoop(ctx context.Context) {
 				ds.sampleMu.Unlock()
 			}
 
+			// Attach reference correction before broadcasting to SSE clients
+			if reading.Valid && ds.refProvider != nil && !ds.cfg.IsReference {
+				if refHz, ok := ds.refProvider(); ok {
+					c := reading.DopplerHz - refHz
+					reading.CorrectedDopplerHz = &c
+				}
+			}
+
 			// Push live update to SSE clients
 			ds.hub.broadcast(ds.cfg.Label, reading)
 
@@ -928,13 +938,19 @@ func (ds *DopplerStation) aggregateMinute() {
 		return
 	}
 
-	var sumDoppler float64
+	var sumDoppler, sumCorrected float64
 	var sumSNR, sumSig, sumNoise float32
+	correctedCount := 0
 	for _, s := range samples {
 		sumDoppler += s.DopplerHz
 		sumSNR += s.SNR
 		sumSig += s.SignalDBFS
 		sumNoise += s.NoiseDBFS
+		// Each 1-second reading already has the per-sample correction applied
+		if s.CorrectedDopplerHz != nil {
+			sumCorrected += *s.CorrectedDopplerHz
+			correctedCount++
+		}
 	}
 	n := float64(len(samples))
 	mean := MinuteMean{
@@ -946,6 +962,18 @@ func (ds *DopplerStation) aggregateMinute() {
 		Count:      len(samples),
 	}
 
+	// Use per-sample corrected mean if we have enough corrected samples,
+	// otherwise fall back to instantaneous reference at aggregation time.
+	if correctedCount >= len(samples)/2 {
+		c := sumCorrected / float64(correctedCount)
+		mean.CorrectedDopplerHz = &c
+	} else if ds.refProvider != nil && !ds.cfg.IsReference {
+		if refHz, ok := ds.refProvider(); ok {
+			c := mean.DopplerHz - refHz
+			mean.CorrectedDopplerHz = &c
+		}
+	}
+
 	ds.mu.Lock()
 	ds.history = append(ds.history, mean)
 	if len(ds.history) > historyDepth {
@@ -953,16 +981,7 @@ func (ds *DopplerStation) aggregateMinute() {
 	}
 	ds.mu.Unlock()
 
-	// Compute reference correction for CSV
-	var correctedHz *float64
-	if ds.refProvider != nil && !ds.cfg.IsReference {
-		if refHz, ok := ds.refProvider(); ok {
-			c := mean.DopplerHz - refHz
-			correctedHz = &c
-		}
-	}
-
-	ds.csvWriter.write(ds.cfg, mean, correctedHz)
+	ds.csvWriter.write(ds.cfg, mean, mean.CorrectedDopplerHz)
 }
 
 // CurrentReading returns the latest 1-second reading (thread-safe).
