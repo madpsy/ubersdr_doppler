@@ -429,7 +429,6 @@ function drawMiniSpectra() {
           <strong style="color:var(--text)">${label}</strong>
           <span style="margin-left:8px">${fmtHz(s.config.freq_hz)}</span>
           <span id="spec-info-${canvasId}" style="margin-left:12px;color:var(--accent)"></span>
-          <span style="margin-left:8px;font-size:0.75rem;color:var(--muted)">scroll to zoom · drag to pan · dbl-click to reset</span>
         </div>
         <canvas id="${canvasId}" width="500" height="100" style="width:100%;height:100px;background:var(--bg);border-radius:4px;border:1px solid var(--border);cursor:crosshair"></canvas>`;
       container.appendChild(wrapper);
