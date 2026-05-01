@@ -93,7 +93,7 @@ func newSSEHub() *sseHub {
 }
 
 func (h *sseHub) subscribe(label string) *sseClient {
-	c := &sseClient{ch: make(chan string, 32), label: label}
+	c := &sseClient{ch: make(chan string, 64), label: label}
 	h.mu.Lock()
 	h.clients[c] = struct{}{}
 	h.mu.Unlock()
@@ -118,6 +118,40 @@ func (h *sseHub) broadcast(label string, r DopplerReading) {
 		return
 	}
 	msg := "data: " + string(data) + "\n\n"
+
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	for c := range h.clients {
+		if c.label == "" || c.label == label {
+			select {
+			case c.ch <- msg:
+			default:
+				// Slow client — drop frame.
+			}
+		}
+	}
+}
+
+// broadcastSpectrum sends a spectrum update to all subscribed SSE clients.
+// Uses a named "spectrum" event so the client can handle it separately from
+// the default onmessage (Doppler reading) handler.
+func (h *sseHub) broadcastSpectrum(label string, bins []float32, peakBin int, binBW float64) {
+	type payload struct {
+		Station      string    `json:"station"`
+		SpectrumData []float32 `json:"spectrum_data"`
+		PeakBin      int       `json:"peak_bin"`
+		BinBandwidth float64   `json:"bin_bandwidth"`
+	}
+	data, err := json.Marshal(payload{
+		Station:      label,
+		SpectrumData: bins,
+		PeakBin:      peakBin,
+		BinBandwidth: binBW,
+	})
+	if err != nil {
+		return
+	}
+	msg := "event: spectrum\ndata: " + string(data) + "\n\n"
 
 	h.mu.Lock()
 	defer h.mu.Unlock()

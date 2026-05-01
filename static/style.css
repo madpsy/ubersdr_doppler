@@ -229,6 +229,16 @@ td { font-variant-numeric: tabular-nums; }
   letter-spacing: 0;
   font-size: 0.75rem;
 }
+.audio-panel-toggles {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  font-weight: 400;
+  text-transform: none;
+  letter-spacing: 0;
+  font-size: 0.78rem;
+}
 .audio-canvas {
   width: 100%;
   display: block;

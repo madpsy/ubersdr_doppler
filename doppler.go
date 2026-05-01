@@ -575,6 +575,10 @@ func (ds *DopplerStation) runSpectrumLoop(ctx context.Context) {
 	var latestBins []float32
 	actualBinBW := specBinBandwidth // updated from server "config" message
 
+	// Rate-limit spectrum SSE broadcasts to at most 10 Hz.
+	var lastSpecBroadcast time.Time
+	const specBroadcastInterval = 100 * time.Millisecond
+
 	// WebSocket reconnect loop
 	connCh := make(chan struct{}, 1)
 	connCh <- struct{}{} // trigger first connect
@@ -709,7 +713,22 @@ func (ds *DopplerStation) runSpectrumLoop(ctx context.Context) {
 
 				specMu.Lock()
 				latestBins = unwrapped
+				bwNow := actualBinBW
 				specMu.Unlock()
+
+				// Broadcast spectrum to SSE clients at up to 10 Hz.
+				now := time.Now()
+				if now.Sub(lastSpecBroadcast) >= specBroadcastInterval {
+					lastSpecBroadcast = now
+					// Use the current peak bin from the last measurement (best effort).
+					ds.mu.RLock()
+					peakBin := ds.latestPeak
+					ds.mu.RUnlock()
+					// Send a copy so the goroutine doesn't race with the next decode.
+					specCopy := make([]float32, len(unwrapped))
+					copy(specCopy, unwrapped)
+					ds.hub.broadcastSpectrum(ds.cfg.Label, specCopy, peakBin, bwNow)
+				}
 			}
 
 			localCancel()

@@ -64,6 +64,14 @@
       <div class="audio-panel">
         <div class="audio-panel-label">FFT Spectrum
           <span class="audio-panel-hint">Real-world frequency axis · carrier = <span id="fft-carrier-label" style="color:var(--green)">—</span> · scroll to zoom · drag to pan · double-click to reset</span>
+          <span class="audio-panel-toggles">
+            <label class="checkbox-label" title="Show/hide expected (nominal) carrier line">
+              <input type="checkbox" id="fft-show-expected" checked> <span style="color:var(--green)">expected</span>
+            </label>
+            <label class="checkbox-label" title="Show/hide actual detected frequency line">
+              <input type="checkbox" id="fft-show-actual" checked> <span style="color:#f85149">actual</span>
+            </label>
+          </span>
         </div>
         <canvas id="audio-fft-canvas" class="audio-canvas" height="160"></canvas>
       </div>

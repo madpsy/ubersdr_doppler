@@ -25,6 +25,8 @@ const AudioAnalysisModal = (() => {
   let _sampleRate     = 12000;
   let _open           = false;
   let _lastReading    = null;  // most recent SSE reading for the active station
+  let _showExpected   = true;  // show green 'expected' carrier line
+  let _showActual     = true;  // show red 'actual' detected frequency line
 
   // Audio passband limits (Hz, audio-relative from dial frequency).
   // Must match the bandwidthLow/bandwidthHigh sent to UberSDR in doppler.go.
@@ -482,7 +484,7 @@ const AudioAnalysisModal = (() => {
     ctx.fillText('Hz', CW - 2, CH - 3);
 
     // Expected carrier (green dashed) — nominal carrier frequency with no Doppler
-    if (_carrierFreqHz >= freqStart && _carrierFreqHz <= freqEnd) {
+    if (_showExpected && _carrierFreqHz >= freqStart && _carrierFreqHz <= freqEnd) {
       const cx = ML + ((_carrierFreqHz - freqStart) / freqSpan) * plotW;
       ctx.strokeStyle = '#3fb950';
       ctx.lineWidth = 1.5;
@@ -496,7 +498,7 @@ const AudioAnalysisModal = (() => {
     }
 
     // Actual detected frequency (red solid) — carrier shifted by measured Doppler
-    if (_lastReading && _lastReading.valid) {
+    if (_showActual && _lastReading && _lastReading.valid) {
       const dHz = (_lastReading.corrected_doppler_hz !== null && _lastReading.corrected_doppler_hz !== undefined)
         ? _lastReading.corrected_doppler_hz
         : _lastReading.doppler_hz;
@@ -702,7 +704,13 @@ const AudioAnalysisModal = (() => {
   // ---------------------------------------------------------------------------
   // Public API
   // ---------------------------------------------------------------------------
-  return { open, close, pushReading, isOpen: () => _open, activeLabel: () => _label };
+  return {
+    open, close, pushReading,
+    isOpen:          () => _open,
+    activeLabel:     () => _label,
+    setShowExpected: v  => { _showExpected = v; },
+    setShowActual:   v  => { _showActual   = v; },
+  };
 })();
 
 // ---------------------------------------------------------------------------
@@ -718,4 +726,10 @@ document.addEventListener('DOMContentLoaded', () => {
       if (e.target === modal) AudioAnalysisModal.close();
     });
   }
+
+  // FFT marker visibility toggles
+  const showExpectedEl = document.getElementById('fft-show-expected');
+  const showActualEl   = document.getElementById('fft-show-actual');
+  if (showExpectedEl) showExpectedEl.addEventListener('change', e => AudioAnalysisModal.setShowExpected(e.target.checked));
+  if (showActualEl)   showActualEl.addEventListener('change',   e => AudioAnalysisModal.setShowActual(e.target.checked));
 });

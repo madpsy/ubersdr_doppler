@@ -324,7 +324,10 @@ function startSpecRenderLoop() {
 
 function getSpecView(canvasId, n) {
   if (!specViewState[canvasId]) {
-    specViewState[canvasId] = { centerBin: n / 2, halfSpan: n / 2 };
+    // Default zoom = 5 scroll-wheel clicks in (factor 0.7 per click)
+    // halfSpan = (n/2) * 0.7^5 ≈ (n/2) * 0.168
+    const defaultHalfSpan = Math.max(10, Math.round((n / 2) * Math.pow(0.7, 5)));
+    specViewState[canvasId] = { centerBin: n / 2, halfSpan: defaultHalfSpan };
   }
   return specViewState[canvasId];
 }
@@ -1036,32 +1039,26 @@ function connectSSE() {
       }
     }, 3000);
 
-    // Throttle spectrum refresh — at most once per 2 seconds
-    let spectrumRefreshPending = false;
-    const scheduleSpectrumRefresh = () => {
-      if (spectrumRefreshPending) return;
-      spectrumRefreshPending = true;
-      setTimeout(async () => {
-        spectrumRefreshPending = false;
-        try {
-          const r = await apiFetch('/api/stations');
-          const data = await r.json() || [];
-          // Merge spectrum_data, peak_bin and bin_bandwidth into existing station objects
-          data.forEach(d => {
-            const s = state.stations.find(x => x.config && x.config.label === d.config.label);
-            if (s) {
-              s.spectrum_data  = d.spectrum_data;
-              s.peak_bin       = d.peak_bin;
-              s.bin_bandwidth  = d.bin_bandwidth;
-            }
-          });
-          drawMiniSpectra();
+    // Handle spectrum SSE events — fired at up to 10 Hz by the server whenever
+    // new spectrum bins arrive from UberSDR. Updates the mini-spectrum canvas
+    // directly without any HTTP polling.
+    es.addEventListener('spectrum', e => {
+      try {
+        const { station, spectrum_data, peak_bin, bin_bandwidth } = JSON.parse(e.data);
+        const s = state.stations.find(x => x.config && x.config.label === station);
+        if (s) {
+          s.spectrum_data = spectrum_data;
+          s.peak_bin      = peak_bin;
+          s.bin_bandwidth = bin_bandwidth;
+          const i = state.stations.indexOf(s);
+          const canvasId = `spec-canvas-${station.replace(/[^a-zA-Z0-9]/g, '_')}`;
+          drawMiniSpectrum(canvasId, s, i);
           updateSpectrumHints();
-        } catch (e) {
-          console.warn('spectrum refresh failed', e);
         }
-      }, 2000);
-    };
+      } catch (err) {
+        console.warn('spectrum SSE parse error', err);
+      }
+    });
 
     es.onmessage = e => {
       retryDelay = 1000;
@@ -1089,8 +1086,6 @@ function connectSSE() {
             AudioAnalysisModal.activeLabel() === station) {
           AudioAnalysisModal.pushReading(reading);
         }
-        // Periodically refresh spectrum data from server
-        scheduleSpectrumRefresh();
       } catch (err) {
         console.warn('SSE parse error', err);
       }
