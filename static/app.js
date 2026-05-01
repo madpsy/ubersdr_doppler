@@ -909,73 +909,87 @@ function appendLivePoint(label, reading) {
 // SSE live feed
 // ---------------------------------------------------------------------------
 function connectSSE() {
-  setConnStatus('connecting');
-  const es = new EventSource(BASE + '/api/events');
+  let retryDelay = 1000; // ms — doubles on each failure, capped at 30s
+  const MAX_RETRY = 30000;
 
-  // Named events from the server — set connected on any of these
-  es.addEventListener('connected',  () => setConnStatus('connected'));
-  es.addEventListener('heartbeat',  () => setConnStatus('connected'));
-  es.onopen = () => setConnStatus('connected');
+  function connect() {
+    setConnStatus('connecting');
+    const es = new EventSource(BASE + '/api/events');
 
-  // Fallback: if the proxy buffers the initial 'connected' event,
-  // set connected after a short delay if the connection is open.
-  setTimeout(() => {
-    if (es.readyState === EventSource.OPEN) {
+    // Named events from the server — set connected on any of these
+    es.addEventListener('connected',  () => { retryDelay = 1000; setConnStatus('connected'); });
+    es.addEventListener('heartbeat',  () => { retryDelay = 1000; setConnStatus('connected'); });
+    es.onopen = () => { retryDelay = 1000; setConnStatus('connected'); };
+
+    // Fallback: if the proxy buffers the initial 'connected' event,
+    // set connected after a short delay if the connection is open.
+    setTimeout(() => {
+      if (es.readyState === EventSource.OPEN) {
+        retryDelay = 1000;
+        setConnStatus('connected');
+      }
+    }, 3000);
+
+    // Throttle spectrum refresh — at most once per 2 seconds
+    let spectrumRefreshPending = false;
+    const scheduleSpectrumRefresh = () => {
+      if (spectrumRefreshPending) return;
+      spectrumRefreshPending = true;
+      setTimeout(async () => {
+        spectrumRefreshPending = false;
+        try {
+          const r = await apiFetch('/api/stations');
+          const data = await r.json() || [];
+          // Merge spectrum_data, peak_bin and bin_bandwidth into existing station objects
+          data.forEach(d => {
+            const s = state.stations.find(x => x.config && x.config.label === d.config.label);
+            if (s) {
+              s.spectrum_data  = d.spectrum_data;
+              s.peak_bin       = d.peak_bin;
+              s.bin_bandwidth  = d.bin_bandwidth;
+            }
+          });
+          drawMiniSpectra();
+        } catch (e) {
+          console.warn('spectrum refresh failed', e);
+        }
+      }, 2000);
+    };
+
+    es.onmessage = e => {
+      retryDelay = 1000;
       setConnStatus('connected');
-    }
-  }, 3000);
-
-  // Throttle spectrum refresh — at most once per 2 seconds
-  let spectrumRefreshPending = false;
-  const scheduleSpectrumRefresh = () => {
-    if (spectrumRefreshPending) return;
-    spectrumRefreshPending = true;
-    setTimeout(async () => {
-      spectrumRefreshPending = false;
       try {
-        const r = await apiFetch('/api/stations');
-        const data = await r.json() || [];
-        // Merge spectrum_data and peak_bin into existing station objects
-        data.forEach(d => {
-          const s = state.stations.find(x => x.config && x.config.label === d.config.label);
-          if (s) {
-            s.spectrum_data = d.spectrum_data;
-            s.peak_bin = d.peak_bin;
-          }
-        });
-        drawMiniSpectra();
-      } catch (e) {
-        console.warn('spectrum refresh failed', e);
+        const { station, reading } = JSON.parse(e.data);
+        const s = state.stations.find(x => x.config && x.config.label === station);
+        if (s) {
+          s.current = reading;
+          renderStatusTable();
+          // Redraw mini spectrum with current reading info (uses cached spectrum_data)
+          const i = state.stations.indexOf(s);
+          const canvasId = `spec-canvas-${station.replace(/[^a-zA-Z0-9]/g, '_')}`;
+          drawMiniSpectrum(canvasId, s, i);
+        }
+        appendLivePoint(station, reading);
+        // Periodically refresh spectrum data from server
+        scheduleSpectrumRefresh();
+      } catch (err) {
+        console.warn('SSE parse error', err);
       }
-    }, 2000);
-  };
+    };
 
-  es.onmessage = e => {
-    setConnStatus('connected');
-    try {
-      const { station, reading } = JSON.parse(e.data);
-      const s = state.stations.find(x => x.config && x.config.label === station);
-      if (s) {
-        s.current = reading;
-        renderStatusTable();
-        // Redraw mini spectrum with current reading info (uses cached spectrum_data)
-        const i = state.stations.indexOf(s);
-        const canvasId = `spec-canvas-${station.replace(/[^a-zA-Z0-9]/g, '_')}`;
-        drawMiniSpectrum(canvasId, s, i);
-      }
-      appendLivePoint(station, reading);
-      // Periodically refresh spectrum data from server
-      scheduleSpectrumRefresh();
-    } catch (err) {
-      console.warn('SSE parse error', err);
-    }
-  };
+    es.onerror = () => {
+      setConnStatus('disconnected');
+      es.close();
+      // Exponential backoff with ±20% jitter to avoid thundering herd
+      const jitter = retryDelay * 0.2 * (Math.random() * 2 - 1);
+      const delay = Math.min(MAX_RETRY, retryDelay + jitter);
+      retryDelay = Math.min(MAX_RETRY, retryDelay * 2);
+      setTimeout(connect, delay);
+    };
+  }
 
-  es.onerror = () => {
-    setConnStatus('disconnected');
-    es.close();
-    setTimeout(connectSSE, 5000);
-  };
+  connect();
 }
 
 // ---------------------------------------------------------------------------
