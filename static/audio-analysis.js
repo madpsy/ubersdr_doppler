@@ -394,40 +394,38 @@ const AudioAnalysisModal = (() => {
     // Helper: bin index → X pixel within [ML, ML+plotW]
     const binToX = i => ML + ((i - binLow) / (numBins - 1)) * plotW;
 
-    // dB range over passband bins — use percentiles rather than min/max so that
-    // a handful of very quiet or very loud outlier bins don't distort the scale.
-    // 10th percentile → noise floor estimate; 95th percentile → peak estimate.
+    // dB range over passband bins — use percentiles to get stable, representative bounds.
+    // Median (p50) → typical noise floor level used to anchor the bottom of the axis.
+    // p95 → peak estimate for the top of the axis (carrier + headroom).
     const visibleVals = [];
     for (let i = binLow; i <= binHigh; i++) {
       if (isFinite(smoothMag[i])) visibleVals.push(smoothMag[i]);
     }
-    let minDB = -120, maxDB = -40;
+    let noiseFloorDB = -100, peakDB = -40;
     if (visibleVals.length > 0) {
       visibleVals.sort((a, b) => a - b);
-      const p10idx = Math.floor(visibleVals.length * 0.10);
+      const p50idx = Math.floor(visibleVals.length * 0.50);
       const p95idx = Math.min(visibleVals.length - 1, Math.floor(visibleVals.length * 0.95));
-      minDB = visibleVals[p10idx];
-      maxDB = visibleVals[p95idx];
+      noiseFloorDB = visibleVals[p50idx];
+      peakDB       = visibleVals[p95idx];
     }
 
     // Bootstrap smoothed bounds on first valid frame
-    if (dbFloorSmooth === null) { dbFloorSmooth = minDB; dbCeilSmooth = maxDB; }
+    if (dbFloorSmooth === null) { dbFloorSmooth = noiseFloorDB; dbCeilSmooth = peakDB; }
 
-    // Expand quickly when signal grows, shrink slowly when it fades
-    if (minDB < dbFloorSmooth) {
-      dbFloorSmooth = dbFloorSmooth * (1 - SCALE_EXPAND_ALPHA) + minDB * SCALE_EXPAND_ALPHA;
+    // Smooth the noise floor and peak independently
+    dbFloorSmooth = dbFloorSmooth * (1 - SCALE_SHRINK_ALPHA) + noiseFloorDB * SCALE_SHRINK_ALPHA;
+    if (peakDB > dbCeilSmooth) {
+      dbCeilSmooth = dbCeilSmooth * (1 - SCALE_EXPAND_ALPHA) + peakDB * SCALE_EXPAND_ALPHA;
     } else {
-      dbFloorSmooth = dbFloorSmooth * (1 - SCALE_SHRINK_ALPHA) + minDB * SCALE_SHRINK_ALPHA;
-    }
-    if (maxDB > dbCeilSmooth) {
-      dbCeilSmooth = dbCeilSmooth * (1 - SCALE_EXPAND_ALPHA) + maxDB * SCALE_EXPAND_ALPHA;
-    } else {
-      dbCeilSmooth = dbCeilSmooth * (1 - SCALE_SHRINK_ALPHA) + maxDB * SCALE_SHRINK_ALPHA;
+      dbCeilSmooth = dbCeilSmooth * (1 - SCALE_SHRINK_ALPHA) + peakDB * SCALE_SHRINK_ALPHA;
     }
 
-    // Snap to 10 dB-rounded boundaries for clean grid lines.
-    // Add 10 dB headroom above the peak and 10 dB below the noise floor.
-    const dbFloor = Math.floor(dbFloorSmooth / 10) * 10 - 10;
+    // Place the axis floor 30 dB below the smoothed noise floor so the noise
+    // floor sits ~25% from the bottom of the plot, with the signal above it
+    // occupying the upper portion of the canvas.
+    // Add 10 dB headroom above the peak.
+    const dbFloor = Math.floor((dbFloorSmooth - 30) / 10) * 10;
     const dbCeil  = Math.ceil(dbCeilSmooth  / 10) * 10 + 10;
     const dbRange = dbCeil - dbFloor || 10;
     const dbToY   = db => plotH - ((db - dbFloor) / dbRange) * plotH;
