@@ -249,7 +249,7 @@ function renderStatusTable() {
       <th>Signal</th>
       <th>Noise Floor</th>
       <th>Updated (UTC)</th>
-      <th>State</th>
+      <th class="col-state">State</th>
       <th>Preview</th>`;
   }
 
@@ -371,7 +371,7 @@ function renderStatusTable() {
       <td>${sig}</td>
       <td>${noise}</td>
       <td>${tsHtml}</td>
-      <td>${stateTxt}</td>
+      <td class="col-state">${stateTxt}</td>
       <td>${previewBtn}</td>
     </tr>`;
   }).join('');
