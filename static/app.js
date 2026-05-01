@@ -491,6 +491,8 @@ function drawMiniSpectra() {
   // Create or reuse canvas elements
   state.stations.forEach((s, i) => {
     const label = s.config.label;
+    const isRef = s.config && s.config.is_reference;
+    const refBadge = isRef ? ' <span class="ref-badge">REF</span>' : '';
     const canvasId = `spec-canvas-${label.replace(/[^a-zA-Z0-9]/g, '_')}`;
     let wrapper = document.getElementById(`spec-wrap-${canvasId}`);
     if (!wrapper) {
@@ -500,7 +502,7 @@ function drawMiniSpectra() {
       wrapper.innerHTML = `
         <div style="font-size:0.82rem;color:var(--muted);margin-bottom:4px">
           <span class="station-dot" style="background:${colourForIndex(i)};display:inline-block;width:10px;height:10px;border-radius:50%;margin-right:6px;vertical-align:middle"></span>
-          <strong style="color:var(--text)">${label}</strong>
+          <strong style="color:var(--text)">${label}</strong>${refBadge}
           <span style="margin-left:8px">${fmtHz(s.config.freq_hz)}</span>
           <span id="spec-info-${canvasId}" style="margin-left:12px;color:var(--accent)"></span>
         </div>
