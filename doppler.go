@@ -568,7 +568,7 @@ func (ds *DopplerStation) runSpectrumLoop(ctx context.Context) {
 				continue
 			}
 
-			reading, peakBin := detectDopplerWithPeak(bins, ds.cfg.FreqHz, specBinBandwidth, ds.minSNR, ds.maxDriftHz)
+			reading, peakBin := detectDopplerWithPeak(bins, specBinBandwidth, ds.minSNR, ds.maxDriftHz)
 			reading.Timestamp = time.Now().UTC()
 
 			// Store spectrum snapshot for the mini-spectrum display
@@ -709,8 +709,9 @@ var wsDialer = &websocket.Dialer{
 
 // detectDoppler finds the carrier peak in the unwrapped spectrum and returns
 // a DopplerReading. The spectrum must already be unwrapped (negative freqs
-// first, then positive freqs).
-func detectDoppler(bins []float32, carrierHz int, binBandwidth, minSNR, maxDriftHz float64) DopplerReading {
+// first, then positive freqs). The returned DopplerHz is the offset from the
+// centre bin (i.e. from the nominal carrier frequency).
+func detectDoppler(bins []float32, binBandwidth, minSNR, maxDriftHz float64) DopplerReading {
 	n := len(bins)
 	if n == 0 {
 		return DopplerReading{}
@@ -753,12 +754,10 @@ func detectDoppler(bins []float32, carrierHz int, binBandwidth, minSNR, maxDrift
 	}
 
 	// Sub-bin interpolation using parabolic peak
-	peakFreqHz := subBinFreq(bins, peakBin, binBandwidth, n)
-
-	// Doppler shift = measured frequency - nominal carrier frequency
-	// After unwrapping: center bin corresponds to carrierHz
-	// bin offset from center × binBandwidth = frequency offset from carrier
-	dopplerHz := peakFreqHz - float64(carrierHz)
+	// subBinFreq returns (centroidBin - n/2) * binBandwidth, which is already
+	// the frequency offset from the carrier (Doppler shift). No further
+	// subtraction of carrierHz is needed.
+	dopplerHz := subBinFreq(bins, peakBin, binBandwidth, n)
 
 	return DopplerReading{
 		DopplerHz:  dopplerHz,
@@ -771,7 +770,7 @@ func detectDoppler(bins []float32, carrierHz int, binBandwidth, minSNR, maxDrift
 
 // detectDopplerWithPeak is like detectDoppler but also returns the integer peak bin index.
 // Returns -1 for peakBin when no valid signal is found.
-func detectDopplerWithPeak(bins []float32, carrierHz int, binBandwidth, minSNR, maxDriftHz float64) (DopplerReading, int) {
+func detectDopplerWithPeak(bins []float32, binBandwidth, minSNR, maxDriftHz float64) (DopplerReading, int) {
 	n := len(bins)
 	if n == 0 {
 		return DopplerReading{}, -1
@@ -799,8 +798,8 @@ func detectDopplerWithPeak(bins []float32, carrierHz int, binBandwidth, minSNR, 
 	if float64(snr) < minSNR {
 		return DopplerReading{SNR: snr, SignalDBFS: peakPower, NoiseDBFS: noiseFloor, Valid: false}, -1
 	}
-	peakFreqHz := subBinFreq(bins, peakBin, binBandwidth, n)
-	dopplerHz := peakFreqHz - float64(carrierHz)
+	// subBinFreq already returns the offset from carrier (Doppler shift).
+	dopplerHz := subBinFreq(bins, peakBin, binBandwidth, n)
 	return DopplerReading{
 		DopplerHz:  dopplerHz,
 		SNR:        snr,
