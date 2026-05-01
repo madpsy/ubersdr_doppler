@@ -1,0 +1,15 @@
+# Compiled binary
+ubersdr_doppler
+
+# Output directories
+doppler_data/
+data/
+
+# Go test cache
+*.test
+*.out
+
+# Editor
+.vscode/
+.idea/
+*.swp

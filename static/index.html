@@ -1,0 +1,230 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>UberSDR Doppler Monitor</title>
+  <link rel="stylesheet" href="style.css">
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns@3.0.0/dist/chartjs-adapter-date-fns.bundle.min.js"></script>
+</head>
+<body>
+  <header>
+    <div class="header-left">
+      <h1>🌐 UberSDR Doppler Monitor</h1>
+      <p class="subtitle">HamSCI ionospheric Doppler shift measurements</p>
+    </div>
+    <div class="header-right">
+      <span id="conn-status" class="conn-badge conn-connecting">⬤ Connecting…</span>
+    </div>
+  </header>
+
+  <main>
+    <!-- Live status table -->
+    <section id="status-section">
+      <h2>Live Status</h2>
+      <div class="table-wrap">
+        <table id="status-table">
+          <thead>
+            <tr>
+              <th>Station</th>
+              <th>Frequency</th>
+              <th>Doppler Shift</th>
+              <th>SNR</th>
+              <th>Signal</th>
+              <th>Noise Floor</th>
+              <th>Updated (UTC)</th>
+              <th>State</th>
+            </tr>
+          </thead>
+          <tbody id="status-tbody">
+            <tr><td colspan="8" class="loading">Loading stations…</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- Doppler chart -->
+    <section id="chart-section">
+      <div class="chart-header">
+        <h2>Doppler Shift History</h2>
+        <div class="chart-controls">
+          <label>View:
+            <select id="hours-select">
+              <option value="1">1h</option>
+              <option value="3">3h</option>
+              <option value="6">6h</option>
+              <option value="12">12h</option>
+              <option value="24" selected>24h</option>
+            </select>
+          </label>
+          <label class="checkbox-label">
+            <input type="checkbox" id="show-snr-chart" checked> Show SNR chart
+          </label>
+        </div>
+      </div>
+      <div class="chart-container">
+        <canvas id="doppler-chart"></canvas>
+      </div>
+      <div class="chart-container snr-chart-container" id="snr-chart-wrap">
+        <canvas id="snr-chart"></canvas>
+      </div>
+      <p class="chart-hint">Zero line = no Doppler shift. Positive = ionosphere falling (layer compressed). Negative = ionosphere rising. Gaps = signal below SNR threshold.</p>
+    </section>
+
+    <!-- Station management -->
+    <section id="manage-section">
+      <h2>Manage Stations</h2>
+      <div id="station-list"></div>
+      <button id="add-btn" class="btn btn-primary">+ Add Station</button>
+
+      <!-- Add/Edit modal -->
+      <div id="modal" class="modal hidden">
+        <div class="modal-box">
+          <h3 id="modal-title">Add Station</h3>
+          <form id="station-form">
+            <input type="hidden" id="f-id">
+
+            <!-- Quick-add preset selector (only shown when adding, not editing) -->
+            <div class="form-row" id="preset-row">
+              <label style="flex:1">Quick-add preset
+                <select id="f-preset">
+                  <option value="">— choose a station or enter manually —</option>
+                  <optgroup label="WWV (Fort Collins, Colorado)">
+                    <option value="WWV-2.5:2500000">WWV 2.5 MHz</option>
+                    <option value="WWV-5:5000000">WWV 5 MHz</option>
+                    <option value="WWV-10:10000000">WWV 10 MHz</option>
+                    <option value="WWV-15:15000000">WWV 15 MHz</option>
+                    <option value="WWV-20:20000000">WWV 20 MHz</option>
+                    <option value="WWV-25:25000000">WWV 25 MHz</option>
+                  </optgroup>
+                  <optgroup label="WWVH (Kauai, Hawaii)">
+                    <option value="WWVH-2.5:2500000">WWVH 2.5 MHz</option>
+                    <option value="WWVH-5:5000000">WWVH 5 MHz</option>
+                    <option value="WWVH-10:10000000">WWVH 10 MHz</option>
+                    <option value="WWVH-15:15000000">WWVH 15 MHz</option>
+                  </optgroup>
+                  <optgroup label="CHU (Ottawa, Canada)">
+                    <option value="CHU-3:3330000">CHU 3.33 MHz</option>
+                    <option value="CHU-7:7850000">CHU 7.85 MHz</option>
+                    <option value="CHU-14:14670000">CHU 14.67 MHz</option>
+                  </optgroup>
+                  <optgroup label="BPM (China)">
+                    <option value="BPM-2.5:2500000">BPM 2.5 MHz</option>
+                    <option value="BPM-5:5000000">BPM 5 MHz</option>
+                    <option value="BPM-10:10000000">BPM 10 MHz</option>
+                    <option value="BPM-15:15000000">BPM 15 MHz</option>
+                  </optgroup>
+                  <optgroup label="JJY (Japan)">
+                    <option value="JJY-40:40000000">JJY 40 kHz</option>
+                    <option value="JJY-60:60000000">JJY 60 kHz</option>
+                  </optgroup>
+                  <optgroup label="Reference signals">
+                    <option value="REF-10:10000000">Local reference 10 MHz (GPSDO)</option>
+                    <option value="REF-5:5000000">Local reference 5 MHz (GPSDO)</option>
+                  </optgroup>
+                </select>
+                <span class="field-hint">Auto-fills label and frequency</span>
+              </label>
+            </div>
+
+            <div class="form-row">
+              <label>Label
+                <input type="text" id="f-label" placeholder="WWV-10" required>
+                <span class="field-hint">e.g. WWV-10, WWVH-5, CHU-7</span>
+              </label>
+              <label>Frequency (Hz)
+                <input type="number" id="f-freq" placeholder="10000000" required min="1">
+                <span class="field-hint">Nominal carrier frequency</span>
+              </label>
+            </div>
+            <div class="form-row">
+              <label>Callsign
+                <input type="text" id="f-callsign" placeholder="N0CALL">
+                <span class="field-hint">Included in CSV output</span>
+              </label>
+              <label>Grid Square
+                <input type="text" id="f-grid" placeholder="FN20">
+                <span class="field-hint">Maidenhead locator</span>
+              </label>
+            </div>
+            <div class="form-row">
+              <label>Min SNR (dB)
+                <input type="number" id="f-min-snr" value="10" step="0.5" min="0">
+                <span class="field-hint">Reject readings below this SNR</span>
+              </label>
+              <label>Max Drift (Hz)
+                <input type="number" id="f-max-drift" value="100" step="1" min="1">
+                <span class="field-hint">±Hz search range around carrier</span>
+              </label>
+            </div>
+            <div class="form-row">
+              <label class="checkbox-label">
+                <input type="checkbox" id="f-enabled" checked> Enabled
+              </label>
+              <label class="checkbox-label">
+                <input type="checkbox" id="f-reference"> Reference station
+                <span class="field-hint" style="margin-left:4px">(local GPSDO — used to cancel hardware clock drift)</span>
+              </label>
+            </div>
+            <div class="form-actions">
+              <button type="submit" class="btn btn-primary">Save</button>
+              <button type="button" id="modal-cancel" class="btn btn-secondary">Cancel</button>
+            </div>
+          </form>
+        </div>
+      </div>
+    </section>
+
+    <!-- Global settings -->
+    <section id="settings-section">
+      <h2>Settings</h2>
+      <div id="ref-quality-banner" class="ref-banner hidden"></div>
+      <form id="settings-form">
+        <div class="form-row">
+          <label>Callsign
+            <input type="text" id="s-callsign" placeholder="N0CALL">
+            <span class="field-hint">Default for all stations (can be overridden per-station)</span>
+          </label>
+          <label>Grid Square
+            <input type="text" id="s-grid" placeholder="FN20">
+            <span class="field-hint">Maidenhead locator</span>
+          </label>
+        </div>
+        <div class="form-row">
+          <label>Frequency Reference
+            <select id="s-freq-ref">
+              <option value="none">None — free-running oscillator (TCXO/OCXO, no GPS)</option>
+              <option value="gpsdo">GPSDO — GPS-disciplined oscillator (hardware)</option>
+              <option value="reference_station">Reference station — software correction via local signal</option>
+            </select>
+            <span class="field-hint">Affects CSV quality flag and data interpretation</span>
+          </label>
+          <label>Reference Description
+            <input type="text" id="s-ref-desc" placeholder="e.g. Leo Bodnar GPSDO on 10 MHz">
+            <span class="field-hint">Optional — for documentation and CSV metadata</span>
+          </label>
+        </div>
+        <div class="form-actions" style="justify-content:flex-start">
+          <button type="submit" class="btn btn-primary">Save Settings</button>
+          <span id="settings-saved" style="color:var(--green);display:none;margin-left:10px">✓ Saved</span>
+        </div>
+      </form>
+    </section>
+
+    <!-- CSV download -->
+    <section id="download-section">
+      <h2>Download CSV</h2>
+      <div class="download-controls">
+        <label>Station: <select id="dl-station"></select></label>
+        <label>Date (UTC): <input type="date" id="dl-date"></label>
+        <button id="dl-btn" class="btn btn-secondary">⬇ Download CSV</button>
+      </div>
+      <p class="hint">CSV files contain 1-minute-mean Doppler observations suitable for HamSCI submission.
+        Columns: <code>timestamp_utc, station, freq_hz, doppler_hz, corrected_doppler_hz, snr_db, signal_dbfs, noise_dbfs, callsign, grid, frequency_reference</code></p>
+    </section>
+  </main>
+
+  <script src="app.js"></script>
+</body>
+</html>

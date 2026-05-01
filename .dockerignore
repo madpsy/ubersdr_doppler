@@ -1,0 +1,6 @@
+.git
+.gitignore
+doppler_data/
+data/
+ubersdr_doppler
+*.test
