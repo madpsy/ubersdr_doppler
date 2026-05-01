@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # install.sh — fetch the docker-compose.yml from the ubersdr_doppler repo and start the service
 #
+# Requires UberSDR to be installed and running first: https://ubersdr.org
+#
 # Usage:
 #   curl -fsSL https://raw.githubusercontent.com/madpsy/ubersdr_doppler/main/install.sh | bash
 #   — or —
@@ -18,7 +20,6 @@ REPO_RAW="https://raw.githubusercontent.com/madpsy/ubersdr_doppler/main"
 INSTALL_DIR="${HOME}/ubersdr/doppler"
 COMPOSE_FILE="docker-compose.yml"
 FORCE_UPDATE="${FORCE_UPDATE:-0}"
-CONFIG_PASS_FILE=".config_pass"
 
 # Parse flags when run directly (not piped)
 for arg in "$@"; do
@@ -45,20 +46,6 @@ mkdir -p "${INSTALL_DIR}"
 cd "${INSTALL_DIR}"
 
 # ---------------------------------------------------------------------------
-# Generate or load the UI password
-# ---------------------------------------------------------------------------
-
-if [[ -f "${CONFIG_PASS_FILE}" ]]; then
-    CONFIG_PASS="$(cat "${CONFIG_PASS_FILE}")"
-    PASS_IS_NEW=0
-else
-    CONFIG_PASS="$(set +o pipefail; LC_ALL=C tr -dc 'A-Za-z0-9' </dev/urandom | head -c 16)"
-    echo "${CONFIG_PASS}" > "${CONFIG_PASS_FILE}"
-    chmod 600 "${CONFIG_PASS_FILE}"
-    PASS_IS_NEW=1
-fi
-
-# ---------------------------------------------------------------------------
 # Fetch compose file
 # ---------------------------------------------------------------------------
 
@@ -74,7 +61,7 @@ fi
 # Fetch helper scripts
 # ---------------------------------------------------------------------------
 
-for script in update.sh start.sh stop.sh restart.sh get-password.sh; do
+for script in update.sh start.sh stop.sh restart.sh; do
     echo "Fetching ${script}..."
     curl -fsSL "${REPO_RAW}/${script}" -o "${script}"
     chmod +x "${script}"
@@ -82,26 +69,12 @@ for script in update.sh start.sh stop.sh restart.sh get-password.sh; do
 done
 
 # ---------------------------------------------------------------------------
-# Inject UI_PASSWORD into compose file
+# Create data directory on the host
 # ---------------------------------------------------------------------------
 
-if grep -q "# UI_PASSWORD:" "${COMPOSE_FILE}"; then
-    sed -i "s|# UI_PASSWORD:.*|UI_PASSWORD: \"${CONFIG_PASS}\"|" "${COMPOSE_FILE}"
-elif grep -q "UI_PASSWORD:" "${COMPOSE_FILE}"; then
-    sed -i "s|UI_PASSWORD:.*|UI_PASSWORD: \"${CONFIG_PASS}\"|" "${COMPOSE_FILE}"
-else
-    sed -i "s|    volumes:|      UI_PASSWORD: \"${CONFIG_PASS}\"\n    volumes:|" "${COMPOSE_FILE}"
-fi
-echo "UI_PASSWORD set in ${COMPOSE_FILE}"
-
-# ---------------------------------------------------------------------------
-# Create recordings directory on the host
-# ---------------------------------------------------------------------------
-
-RECORDINGS_DIR="recordings"
-mkdir -p "${INSTALL_DIR}/${RECORDINGS_DIR}"
-chmod 777 "${INSTALL_DIR}/${RECORDINGS_DIR}"
-echo "Recordings directory ready: ${INSTALL_DIR}/${RECORDINGS_DIR}"
+DATA_DIR="doppler_data"
+mkdir -p "${INSTALL_DIR}/${DATA_DIR}"
+echo "Data directory ready: ${INSTALL_DIR}/${DATA_DIR}"
 
 # ---------------------------------------------------------------------------
 # Pull image and start service
@@ -120,38 +93,21 @@ echo "  Stop       : ./stop.sh"
 echo "  Start      : ./start.sh"
 echo "  Restart    : ./restart.sh"
 echo "  Update     : ./update.sh"
-echo "  Password   : ./get-password.sh"
 echo ""
-echo "Edit ${INSTALL_DIR}/${COMPOSE_FILE} to configure UBERSDR_URL, UBERSDR_CHANNELS, etc."
-echo "Then run ./restart.sh to apply changes."
-echo ""
-if [[ "${PASS_IS_NEW}" == "1" ]]; then
-    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-    echo "  UI PASSWORD (auto-generated)"
-    echo ""
-    echo "  ${CONFIG_PASS}"
-    echo ""
-    echo "  This password protects write actions in the web UI (delete recordings)."
-    echo "  It has been saved to: ${INSTALL_DIR}/${CONFIG_PASS_FILE}"
-    echo ""
-    echo "  To change it, edit UI_PASSWORD in ${INSTALL_DIR}/${COMPOSE_FILE}"
-    echo "  and run ./restart.sh  (also update ${CONFIG_PASS_FILE} to match)."
-    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-else
-    echo "  UI password loaded from ${INSTALL_DIR}/${CONFIG_PASS_FILE}"
-fi
+echo "Edit ${INSTALL_DIR}/${COMPOSE_FILE} to set UBERSDR_URL, then run ./restart.sh"
 echo ""
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo "  UBERSDR PROXY CONFIGURATION"
 echo ""
-echo "  This addon can be added as an UberSDR Proxy via the Admin interface:"
+echo "  Add this addon via the UberSDR Admin → Addon Proxies interface:"
 echo ""
-echo "    Name              : doppler"
-echo "    Host              : doppler"
-echo "    Port              : 6096"
-echo "    Enabled           : true"
-echo "    Strip prefix      : true"
-echo "    Rewrite websocket : false"
-echo "    Rate Limit        : 250"
+echo "    Name         : doppler"
+echo "    Host         : doppler"
+echo "    Port         : 6096"
+echo "    Enabled      : true"
+echo "    Strip prefix : true"
+echo "    Rate Limit   : 100"
+echo ""
+echo "  Then access the web UI at: http://your-ubersdr-host/addon/doppler/"
 echo ""
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
