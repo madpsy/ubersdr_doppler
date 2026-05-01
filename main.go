@@ -45,6 +45,7 @@ func main() {
 		ubersdrURL = flag.String("url", envOr("UBERSDR_URL", "ws://ubersdr:8080/ws"), "UberSDR WebSocket URL (env: UBERSDR_URL)")
 		dataDir    = flag.String("data", envOr("DOPPLER_DATA_DIR", "/data"), "Data directory for stations.json, settings.json and CSV logs (env: DOPPLER_DATA_DIR)")
 		listenAddr = flag.String("listen", ":"+envOr("WEB_PORT", "6096"), "HTTP listen address (env: WEB_PORT)")
+		uiPassword = flag.String("ui-password", envOr("UI_PASSWORD", ""), "Password required for write actions in the web UI (env: UI_PASSWORD; empty = write actions disabled)")
 	)
 	flag.Parse()
 
@@ -95,7 +96,7 @@ func main() {
 
 	// HTTP server
 	go func() {
-		if err := startHTTPServer(*listenAddr, mgr, hub, settingsPath, &settings, &settingsMu, cw); err != nil {
+		if err := startHTTPServer(*listenAddr, mgr, hub, settingsPath, &settings, &settingsMu, cw, *uiPassword); err != nil {
 			log.Fatalf("[main] HTTP server: %v", err)
 		}
 	}()

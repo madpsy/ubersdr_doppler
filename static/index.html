@@ -16,8 +16,30 @@
     </div>
     <div class="header-right">
       <span id="conn-status" class="conn-badge conn-connecting">⬤ Connecting…</span>
+      <button id="auth-btn" class="btn btn-secondary" style="display:none;margin-left:10px">🔒 Login</button>
+      <button id="logout-btn" class="btn btn-secondary" style="display:none;margin-left:10px">Logout</button>
     </div>
   </header>
+
+  <!-- Login modal -->
+  <div id="login-modal" class="modal hidden">
+    <div class="modal-box" style="max-width:360px">
+      <h3>Login required</h3>
+      <p style="color:var(--muted);font-size:0.85rem;margin:10px 0 16px">Enter the UI password to enable write actions (add/edit stations, change settings).</p>
+      <form id="login-form">
+        <div class="form-row">
+          <label>Password
+            <input type="password" id="login-password" placeholder="UI password" required autocomplete="current-password">
+          </label>
+        </div>
+        <div id="login-error" style="color:var(--red);font-size:0.82rem;display:none;margin-bottom:8px"></div>
+        <div class="form-actions">
+          <button type="submit" class="btn btn-primary">Login</button>
+          <button type="button" id="login-cancel" class="btn btn-secondary">Cancel</button>
+        </div>
+      </form>
+    </div>
+  </div>
 
   <main>
     <!-- Live status table -->

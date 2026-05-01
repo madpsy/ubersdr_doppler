@@ -2,7 +2,9 @@
 package main
 
 import (
+	"crypto/rand"
 	"embed"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io/fs"
@@ -17,6 +19,58 @@ import (
 
 //go:embed static
 var staticFiles embed.FS
+
+// ---------------------------------------------------------------------------
+// Session store — in-memory set of valid session tokens
+// ---------------------------------------------------------------------------
+
+type sessionStore struct {
+	mu     sync.RWMutex
+	tokens map[string]struct{}
+}
+
+func newSessionStore() *sessionStore {
+	return &sessionStore{tokens: make(map[string]struct{})}
+}
+
+func (s *sessionStore) create() string {
+	b := make([]byte, 16)
+	if _, err := rand.Read(b); err != nil {
+		panic("session token generation failed: " + err.Error())
+	}
+	tok := hex.EncodeToString(b)
+	s.mu.Lock()
+	s.tokens[tok] = struct{}{}
+	s.mu.Unlock()
+	return tok
+}
+
+func (s *sessionStore) valid(tok string) bool {
+	if tok == "" {
+		return false
+	}
+	s.mu.RLock()
+	_, ok := s.tokens[tok]
+	s.mu.RUnlock()
+	return ok
+}
+
+const sessionCookieName = "ui_session"
+
+// requiresAuth checks that the request carries a valid session cookie.
+// If uiPassword is empty, write actions are disabled entirely.
+func requiresAuth(w http.ResponseWriter, r *http.Request, uiPassword string, sessions *sessionStore) bool {
+	if uiPassword == "" {
+		http.Error(w, `{"error":"write actions are disabled — set UI_PASSWORD to enable them"}`, http.StatusForbidden)
+		return false
+	}
+	cookie, err := r.Cookie(sessionCookieName)
+	if err != nil || !sessions.valid(cookie.Value) {
+		http.Error(w, `{"error":"authentication required"}`, http.StatusUnauthorized)
+		return false
+	}
+	return true
+}
 
 // ---------------------------------------------------------------------------
 // SSE hub — fan-out of live DopplerReading events to browser clients
@@ -88,7 +142,9 @@ func startHTTPServer(
 	settings *globalSettings,
 	settingsMu *sync.RWMutex,
 	cw *csvWriter,
+	uiPassword string,
 ) error {
+	sessions := newSessionStore()
 	mux := http.NewServeMux()
 
 	// Static files (embedded).
@@ -97,6 +153,74 @@ func startHTTPServer(
 		return fmt.Errorf("embed sub: %w", err)
 	}
 	mux.Handle("/", http.FileServer(http.FS(sub)))
+
+	// ── Auth endpoints ─────────────────────────────────────────────────────
+	// GET /api/auth/status
+	mux.HandleFunc("/api/auth/status", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		configured := uiPassword != ""
+		authed := false
+		if configured {
+			if cookie, err := r.Cookie(sessionCookieName); err == nil {
+				authed = sessions.valid(cookie.Value)
+			}
+		}
+		jsonResponse(w, map[string]interface{}{
+			"password_configured": configured,
+			"authenticated":       authed,
+		})
+	})
+
+	// POST /api/auth/login  {"password":"..."}
+	mux.HandleFunc("/api/auth/login", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		if uiPassword == "" {
+			http.Error(w, `{"error":"no password configured"}`, http.StatusForbidden)
+			return
+		}
+		var body struct {
+			Password string `json:"password"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			http.Error(w, "invalid body", http.StatusBadRequest)
+			return
+		}
+		if body.Password != uiPassword {
+			http.Error(w, `{"error":"incorrect password"}`, http.StatusUnauthorized)
+			return
+		}
+		tok := sessions.create()
+		http.SetCookie(w, &http.Cookie{
+			Name:     sessionCookieName,
+			Value:    tok,
+			Path:     "/",
+			HttpOnly: true,
+			SameSite: http.SameSiteLaxMode,
+		})
+		jsonResponse(w, map[string]interface{}{"ok": true})
+	})
+
+	// POST /api/auth/logout
+	mux.HandleFunc("/api/auth/logout", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		http.SetCookie(w, &http.Cookie{
+			Name:    sessionCookieName,
+			Value:   "",
+			Path:    "/",
+			Expires: time.Unix(0, 0),
+			MaxAge:  -1,
+		})
+		w.WriteHeader(http.StatusNoContent)
+	})
 
 	// ── Live SSE feed ──────────────────────────────────────────────────────
 	mux.HandleFunc("/api/events", func(w http.ResponseWriter, r *http.Request) {
@@ -136,7 +260,6 @@ func startHTTPServer(
 	})
 
 	// ── Global settings ────────────────────────────────────────────────────
-	// GET /api/settings — return current global settings
 	mux.HandleFunc("/api/settings", func(w http.ResponseWriter, r *http.Request) {
 		switch r.Method {
 		case http.MethodGet:
@@ -146,12 +269,15 @@ func startHTTPServer(
 			jsonResponse(w, s)
 
 		case http.MethodPost:
+			// Write action — requires authentication
+			if !requiresAuth(w, r, uiPassword, sessions) {
+				return
+			}
 			var s globalSettings
 			if err := json.NewDecoder(r.Body).Decode(&s); err != nil {
 				http.Error(w, "invalid JSON: "+err.Error(), http.StatusBadRequest)
 				return
 			}
-			// Validate frequency_reference value
 			switch s.FrequencyReference {
 			case FreqRefNone, FreqRefGPSDO, FreqRefReferenceStation:
 				// valid
@@ -162,13 +288,11 @@ func startHTTPServer(
 			settingsMu.Lock()
 			*settings = s
 			settingsMu.Unlock()
-			// Persist to disk
 			if err := saveGlobalSettings(settingsPath, s); err != nil {
 				log.Printf("[web] save settings: %v", err)
 				http.Error(w, "failed to save settings", http.StatusInternalServerError)
 				return
 			}
-			// Update CSV writer so new rows use the updated settings
 			cw.UpdateSettings(s)
 			log.Printf("[web] settings updated: freq_ref=%s callsign=%s grid=%s", s.FrequencyReference, s.Callsign, s.Grid)
 			w.WriteHeader(http.StatusNoContent)
@@ -179,8 +303,6 @@ func startHTTPServer(
 	})
 
 	// ── Station list ───────────────────────────────────────────────────────
-	// GET /api/stations — list all stations with current reading, 1-hour baseline,
-	// and reference correction (if a reference station is configured).
 	mux.HandleFunc("/api/stations", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -189,9 +311,9 @@ func startHTTPServer(
 		type stationStatus struct {
 			Config           stationConfig  `json:"config"`
 			Current          DopplerReading `json:"current"`
-			BaselineMean     *float64       `json:"baseline_mean_hz"`     // 1-hour mean; nil if insufficient data
-			BaselineN        int            `json:"baseline_n"`           // number of minute-means in baseline
-			CorrectedDoppler *float64       `json:"corrected_doppler_hz"` // current - reference - manual_offset; nil if no correction active
+			BaselineMean     *float64       `json:"baseline_mean_hz"`
+			BaselineN        int            `json:"baseline_n"`
+			CorrectedDoppler *float64       `json:"corrected_doppler_hz"`
 		}
 		refHz, refValid := mgr.referenceCorrection()
 		settingsMu.RLock()
@@ -209,13 +331,11 @@ func startHTTPServer(
 			cur := ds.CurrentReading()
 			var corrPtr *float64
 			if cur.Valid && !ds.cfg.IsReference {
-				// Apply reference correction (if available) and manual offset
 				corr := cur.DopplerHz
 				if refValid {
 					corr -= refHz
 				}
 				corr -= manualOffset
-				// Only set corrPtr if at least one correction is active
 				if refValid || manualOffset != 0 {
 					corrPtr = &corr
 				}
@@ -232,7 +352,6 @@ func startHTTPServer(
 	})
 
 	// ── History ────────────────────────────────────────────────────────────
-	// GET /api/history?station=<label>
 	mux.HandleFunc("/api/history", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -252,11 +371,14 @@ func startHTTPServer(
 		http.Error(w, "station not found", http.StatusNotFound)
 	})
 
-	// ── Station CRUD ───────────────────────────────────────────────────────
+	// ── Station CRUD (all write — require auth) ────────────────────────────
 	// POST /api/stations/add
 	mux.HandleFunc("/api/stations/add", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		if !requiresAuth(w, r, uiPassword, sessions) {
 			return
 		}
 		var cfg stationConfig
@@ -280,10 +402,13 @@ func startHTTPServer(
 		jsonResponse(w, ds.cfg)
 	})
 
-	// POST /api/stations/remove  {"label":"WWV-10"}
+	// POST /api/stations/remove
 	mux.HandleFunc("/api/stations/remove", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		if !requiresAuth(w, r, uiPassword, sessions) {
 			return
 		}
 		var req struct {
@@ -300,10 +425,13 @@ func startHTTPServer(
 		w.WriteHeader(http.StatusNoContent)
 	})
 
-	// POST /api/stations/update  — full stationConfig body (id required)
+	// POST /api/stations/update
 	mux.HandleFunc("/api/stations/update", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		if !requiresAuth(w, r, uiPassword, sessions) {
 			return
 		}
 		var cfg stationConfig
@@ -323,7 +451,6 @@ func startHTTPServer(
 	})
 
 	// ── CSV download ───────────────────────────────────────────────────────
-	// GET /api/csv?station=<label>&date=YYYY-MM-DD
 	mux.HandleFunc("/api/csv", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -344,24 +471,46 @@ func startHTTPServer(
 			http.Error(w, "invalid station label", http.StatusBadRequest)
 			return
 		}
-		path := filepath.Join(mgr.dataDir,
+		// Find the Grape-format filename for this station/date
+		dir := filepath.Join(mgr.dataDir,
 			fmt.Sprintf("%04d", t.Year()),
 			fmt.Sprintf("%02d", t.Month()),
 			fmt.Sprintf("%02d", t.Day()),
-			label+".csv",
 		)
-		f, err := os.Open(path)
+		// List files in the directory matching the station label
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			http.Error(w, "no data for that station/date", http.StatusNotFound)
+			return
+		}
+		var matchPath string
+		for _, e := range entries {
+			if strings.Contains(e.Name(), "_FRQ_"+label+".csv") {
+				matchPath = filepath.Join(dir, e.Name())
+				break
+			}
+		}
+		if matchPath == "" {
+			http.Error(w, "no data for that station/date", http.StatusNotFound)
+			return
+		}
+		f, err := os.Open(matchPath)
 		if err != nil {
 			http.Error(w, "no data for that station/date", http.StatusNotFound)
 			return
 		}
 		defer f.Close()
 		w.Header().Set("Content-Type", "text/csv")
-		w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="%s_%s.csv"`, label, date))
-		http.ServeContent(w, r, label+".csv", t, f)
+		w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="%s"`, filepath.Base(matchPath)))
+		http.ServeContent(w, r, filepath.Base(matchPath), t, f)
 	})
 
-	log.Printf("[web] listening on %s", addr)
+	log.Printf("[web] listening on %s (write actions: %s)", addr, func() string {
+		if uiPassword == "" {
+			return "disabled — set UI_PASSWORD"
+		}
+		return "password protected"
+	}())
 	return http.ListenAndServe(addr, mux)
 }
 

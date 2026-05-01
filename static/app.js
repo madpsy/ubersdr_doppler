@@ -20,7 +20,58 @@ const state = {
   showSNR: true,
   showPower: true,
   chartMode: 'doppler',  // 'doppler' | 'absolute'
+  auth: {
+    passwordConfigured: false,
+    authenticated: false,
+  },
 };
+
+// ---------------------------------------------------------------------------
+// Auth
+// ---------------------------------------------------------------------------
+async function checkAuthStatus() {
+  try {
+    const r = await apiFetch('/api/auth/status');
+    const s = await r.json();
+    state.auth.passwordConfigured = s.password_configured;
+    state.auth.authenticated = s.authenticated;
+    updateAuthUI();
+  } catch (e) {
+    console.warn('auth status check failed', e);
+  }
+}
+
+function updateAuthUI() {
+  const { passwordConfigured, authenticated } = state.auth;
+  const authBtn   = document.getElementById('auth-btn');
+  const logoutBtn = document.getElementById('logout-btn');
+  const addBtn    = document.getElementById('add-btn');
+  const settingsForm = document.getElementById('settings-form');
+
+  // Show login button if password is configured but not authenticated
+  if (authBtn)   authBtn.style.display   = (passwordConfigured && !authenticated) ? '' : 'none';
+  if (logoutBtn) logoutBtn.style.display = (passwordConfigured && authenticated)  ? '' : 'none';
+
+  // Write controls: visible only when authenticated (or no password configured)
+  const canWrite = !passwordConfigured || authenticated;
+  if (addBtn) addBtn.style.display = canWrite ? '' : 'none';
+  if (settingsForm) {
+    const submitBtn = settingsForm.querySelector('button[type="submit"]');
+    if (submitBtn) submitBtn.style.display = canWrite ? '' : 'none';
+  }
+  // Station edit/remove buttons are rendered dynamically in renderStationList()
+}
+
+function openLoginModal() {
+  document.getElementById('login-password').value = '';
+  document.getElementById('login-error').style.display = 'none';
+  document.getElementById('login-modal').classList.remove('hidden');
+  document.getElementById('login-password').focus();
+}
+
+function closeLoginModal() {
+  document.getElementById('login-modal').classList.add('hidden');
+}
 
 const COLOURS = [
   '#58a6ff', '#3fb950', '#f78166', '#d29922',
@@ -516,6 +567,8 @@ function connectSSE() {
 // ---------------------------------------------------------------------------
 function renderStationList() {
   const el = document.getElementById('station-list');
+  const canWrite = !state.auth.passwordConfigured || state.auth.authenticated;
+
   if (state.stations.length === 0) {
     el.innerHTML = '<p style="color:var(--muted)">No stations configured.</p>';
     return;
@@ -525,6 +578,12 @@ function renderStationList() {
     const colour = colourForIndex(i);
     const dis = cfg.enabled ? '' : ' station-disabled';
     const refNote = cfg.is_reference ? ' · <span style="color:var(--yellow)">reference</span>' : '';
+    const actions = canWrite
+      ? `<div class="station-actions">
+          <button class="btn btn-secondary btn-sm" onclick="editStation('${cfg.id}')">Edit</button>
+          <button class="btn btn-danger btn-sm" onclick="removeStation('${cfg.label}')">Remove</button>
+        </div>`
+      : '';
     return `<div class="station-card${dis}" data-id="${cfg.id}">
       <div class="station-info">
         <span class="station-name">
@@ -533,10 +592,7 @@ function renderStationList() {
         </span>
         <span class="station-meta">${fmtHz(cfg.freq_hz)} · SNR ≥ ${cfg.min_snr} dB · ±${cfg.max_drift_hz} Hz · ${cfg.enabled ? 'enabled' : 'disabled'}${refNote}${cfg.callsign ? ' · ' + cfg.callsign : ''}${cfg.grid ? ' · ' + cfg.grid : ''}</span>
       </div>
-      <div class="station-actions">
-        <button class="btn btn-secondary btn-sm" onclick="editStation('${cfg.id}')">Edit</button>
-        <button class="btn btn-danger btn-sm" onclick="removeStation('${cfg.label}')">Remove</button>
-      </div>
+      ${actions}
     </div>`;
   }).join('');
 }
@@ -606,10 +662,62 @@ window.removeStation = async function(label) {
 // ---------------------------------------------------------------------------
 document.addEventListener('DOMContentLoaded', async () => {
   initCharts();
+  await checkAuthStatus();
   await loadSettings();
   await loadStations();
   await loadHistory();
   connectSSE();
+
+  // ── Auth buttons ─────────────────────────────────────────────────────────
+  const authBtn = document.getElementById('auth-btn');
+  if (authBtn) authBtn.addEventListener('click', openLoginModal);
+
+  const logoutBtn = document.getElementById('logout-btn');
+  if (logoutBtn) {
+    logoutBtn.addEventListener('click', async () => {
+      try {
+        await apiFetch('/api/auth/logout', { method: 'POST' });
+        state.auth.authenticated = false;
+        updateAuthUI();
+        renderStationList();
+      } catch (e) {
+        console.warn('logout failed', e);
+      }
+    });
+  }
+
+  // ── Login modal ───────────────────────────────────────────────────────────
+  const loginCancel = document.getElementById('login-cancel');
+  if (loginCancel) loginCancel.addEventListener('click', closeLoginModal);
+  const loginModal = document.getElementById('login-modal');
+  if (loginModal) {
+    loginModal.addEventListener('click', e => {
+      if (e.target === loginModal) closeLoginModal();
+    });
+  }
+
+  const loginForm = document.getElementById('login-form');
+  if (loginForm) {
+    loginForm.addEventListener('submit', async e => {
+      e.preventDefault();
+      const pw = document.getElementById('login-password').value;
+      const errEl = document.getElementById('login-error');
+      try {
+        await apiFetch('/api/auth/login', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ password: pw }),
+        });
+        state.auth.authenticated = true;
+        updateAuthUI();
+        renderStationList();
+        closeLoginModal();
+      } catch (err) {
+        errEl.textContent = 'Incorrect password.';
+        errEl.style.display = '';
+      }
+    });
+  }
 
   // ── Preset selector ──────────────────────────────────────────────────────
   const presetSel = document.getElementById('f-preset');

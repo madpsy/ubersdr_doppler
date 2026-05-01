@@ -7,31 +7,14 @@ services:
       # UberSDR WebSocket URL
       UBERSDR_URL: "ws://ubersdr:8080/ws"
       #
-      # Stations to monitor — comma-separated label:freq_hz pairs
-      # Examples:
-      #   WWV-10:10000000   — WWV 10 MHz (Fort Collins, Colorado)
-      #   WWV-15:15000000   — WWV 15 MHz
-      #   WWV-5:5000000     — WWV 5 MHz
-      #   WWV-20:20000000   — WWV 20 MHz
-      #   WWVH-5:5000000    — WWVH 5 MHz (Kauai, Hawaii)
-      #   WWVH-10:10000000  — WWVH 10 MHz
-      #   CHU-3:3330000     — CHU 3.33 MHz (Ottawa, Canada)
-      #   CHU-7:7850000     — CHU 7.85 MHz
-      #   CHU-14:14670000   — CHU 14.67 MHz
-      DOPPLER_STATIONS: "WWV-10:10000000,WWV-15:15000000,WWVH-5:5000000"
+      # Password required for write actions in the web UI
+      # (add/edit/remove stations, change settings)
+      # Generated automatically by install.sh — do not edit manually.
+      # Use ./get-password.sh to display the current password.
+      # UI_PASSWORD: ""
       #
-      # Your station metadata (included in CSV output)
-      DOPPLER_CALLSIGN: "N0CALL"
-      DOPPLER_GRID: "FN20"
-      #
-      # Minimum SNR in dB to accept a measurement (default: 10)
-      DOPPLER_MIN_SNR: "10"
-      #
-      # Maximum Doppler drift to search in Hz either side of carrier (default: 100)
-      DOPPLER_MAX_DRIFT_HZ: "100"
-      #
-      # Directory for CSV log files inside the container
-      DOPPLER_LOG_DIR: "/data"
+      # Data directory inside the container (stations.json, settings.json, CSV logs)
+      DOPPLER_DATA: "/data"
       #
       # Web UI port (default: 6096)
       # WEB_PORT: "6096"

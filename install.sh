@@ -20,6 +20,7 @@ REPO_RAW="https://raw.githubusercontent.com/madpsy/ubersdr_doppler/main"
 INSTALL_DIR="${HOME}/ubersdr/doppler"
 COMPOSE_FILE="docker-compose.yml"
 FORCE_UPDATE="${FORCE_UPDATE:-0}"
+CONFIG_PASS_FILE=".config_pass"
 
 # Parse flags when run directly (not piped)
 for arg in "$@"; do
@@ -46,6 +47,20 @@ mkdir -p "${INSTALL_DIR}"
 cd "${INSTALL_DIR}"
 
 # ---------------------------------------------------------------------------
+# Generate or load the UI password
+# ---------------------------------------------------------------------------
+
+if [[ -f "${CONFIG_PASS_FILE}" ]]; then
+    CONFIG_PASS="$(cat "${CONFIG_PASS_FILE}")"
+    PASS_IS_NEW=0
+else
+    CONFIG_PASS="$(set +o pipefail; LC_ALL=C tr -dc 'A-Za-z0-9' </dev/urandom | head -c 16)"
+    echo "${CONFIG_PASS}" > "${CONFIG_PASS_FILE}"
+    chmod 600 "${CONFIG_PASS_FILE}"
+    PASS_IS_NEW=1
+fi
+
+# ---------------------------------------------------------------------------
 # Fetch compose file
 # ---------------------------------------------------------------------------
 
@@ -61,12 +76,25 @@ fi
 # Fetch helper scripts
 # ---------------------------------------------------------------------------
 
-for script in update.sh start.sh stop.sh restart.sh; do
+for script in update.sh start.sh stop.sh restart.sh get-password.sh; do
     echo "Fetching ${script}..."
     curl -fsSL "${REPO_RAW}/${script}" -o "${script}"
     chmod +x "${script}"
     echo "Saved ${script}"
 done
+
+# ---------------------------------------------------------------------------
+# Inject UI_PASSWORD into compose file
+# ---------------------------------------------------------------------------
+
+if grep -q "# UI_PASSWORD:" "${COMPOSE_FILE}"; then
+    sed -i "s|# UI_PASSWORD:.*|UI_PASSWORD: \"${CONFIG_PASS}\"|" "${COMPOSE_FILE}"
+elif grep -q "UI_PASSWORD:" "${COMPOSE_FILE}"; then
+    sed -i "s|UI_PASSWORD:.*|UI_PASSWORD: \"${CONFIG_PASS}\"|" "${COMPOSE_FILE}"
+else
+    sed -i "s|      DOPPLER_DATA:|      UI_PASSWORD: \"${CONFIG_PASS}\"\n      DOPPLER_DATA:|" "${COMPOSE_FILE}"
+fi
+echo "UI_PASSWORD set in ${COMPOSE_FILE}"
 
 # ---------------------------------------------------------------------------
 # Create data directory on the host
@@ -93,8 +121,26 @@ echo "  Stop       : ./stop.sh"
 echo "  Start      : ./start.sh"
 echo "  Restart    : ./restart.sh"
 echo "  Update     : ./update.sh"
+echo "  Password   : ./get-password.sh"
 echo ""
 echo "Edit ${INSTALL_DIR}/${COMPOSE_FILE} to set UBERSDR_URL, then run ./restart.sh"
+echo ""
+if [[ "${PASS_IS_NEW}" == "1" ]]; then
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo "  UI PASSWORD (auto-generated)"
+    echo ""
+    echo "  ${CONFIG_PASS}"
+    echo ""
+    echo "  This password protects write actions in the web UI"
+    echo "  (add/edit/remove stations, change settings)."
+    echo "  It has been saved to: ${INSTALL_DIR}/${CONFIG_PASS_FILE}"
+    echo ""
+    echo "  To change it, edit UI_PASSWORD in ${INSTALL_DIR}/${COMPOSE_FILE}"
+    echo "  and run ./restart.sh  (also update ${CONFIG_PASS_FILE} to match)."
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+else
+    echo "  UI password loaded from ${INSTALL_DIR}/${CONFIG_PASS_FILE}"
+fi
 echo ""
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo "  UBERSDR PROXY CONFIGURATION"
