@@ -27,13 +27,15 @@ COPY --from=go-builder /out/ubersdr_doppler /usr/local/bin/ubersdr_doppler
 COPY entrypoint.sh /usr/local/bin/entrypoint.sh
 
 # Create the default data directory and ensure the doppler user owns it.
+# Note: no VOLUME declaration — the docker-compose.yml bind mount handles persistence.
+# A VOLUME declaration would cause Docker to create a root-owned anonymous volume
+# that overwrites the chown, preventing the doppler user from writing to /data.
 RUN chmod +x /usr/local/bin/entrypoint.sh \
     && mkdir -p /data \
-    && chown doppler:doppler /data
+    && chown doppler:doppler /data \
+    && chmod 755 /data
 
 USER doppler
-
-VOLUME ["/data"]
 
 # Expose the web UI port (default; override with WEB_PORT env var)
 EXPOSE 6096

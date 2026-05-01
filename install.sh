@@ -102,6 +102,8 @@ echo "UI_PASSWORD set in ${COMPOSE_FILE}"
 
 DATA_DIR="doppler_data"
 mkdir -p "${INSTALL_DIR}/${DATA_DIR}"
+# Make writable by the container's doppler user (uid 999)
+chmod 777 "${INSTALL_DIR}/${DATA_DIR}"
 echo "Data directory ready: ${INSTALL_DIR}/${DATA_DIR}"
 
 # ---------------------------------------------------------------------------
