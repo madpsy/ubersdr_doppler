@@ -1039,22 +1039,54 @@ function connectSSE() {
       }
     }, 3000);
 
-    // Handle spectrum SSE events — fired at up to 10 Hz by the server whenever
-    // new spectrum bins arrive from UberSDR. Updates the mini-spectrum canvas
-    // directly without any HTTP polling.
+    // Handle spectrum SSE events — fired at up to 10 Hz by the server.
+    // Payload: base64(gzip(uint8[])) where uint8 = dBFS + 256.
+    // DecompressionStream is supported in all modern browsers (Chrome 80+, Firefox 113+, Safari 16.4+).
     es.addEventListener('spectrum', e => {
       try {
-        const { station, spectrum_data, peak_bin, bin_bandwidth } = JSON.parse(e.data);
+        const { station, spectrum_gz, peak_bin, bin_bandwidth } = JSON.parse(e.data);
         const s = state.stations.find(x => x.config && x.config.label === station);
-        if (s) {
-          s.spectrum_data = spectrum_data;
-          s.peak_bin      = peak_bin;
-          s.bin_bandwidth = bin_bandwidth;
-          const i = state.stations.indexOf(s);
-          const canvasId = `spec-canvas-${station.replace(/[^a-zA-Z0-9]/g, '_')}`;
-          drawMiniSpectrum(canvasId, s, i);
-          updateSpectrumHints();
-        }
+        if (!s) return;
+
+        // base64 → Uint8Array (gzip bytes)
+        const b64 = spectrum_gz;
+        const binStr = atob(b64);
+        const gzBytes = new Uint8Array(binStr.length);
+        for (let i = 0; i < binStr.length; i++) gzBytes[i] = binStr.charCodeAt(i);
+
+        // Decompress gzip → uint8 bins → float32 dBFS
+        const ds = new DecompressionStream('gzip');
+        const writer = ds.writable.getWriter();
+        const reader = ds.readable.getReader();
+        writer.write(gzBytes);
+        writer.close();
+
+        // Collect all decompressed chunks then update canvas
+        const chunks = [];
+        (function pump() {
+          reader.read().then(({ done, value }) => {
+            if (done) {
+              // Concatenate chunks into a single Uint8Array
+              const total = chunks.reduce((n, c) => n + c.length, 0);
+              const u8 = new Uint8Array(total);
+              let off = 0;
+              for (const c of chunks) { u8.set(c, off); off += c.length; }
+              // Convert uint8 → float32 dBFS
+              const bins = new Float32Array(u8.length);
+              for (let i = 0; i < u8.length; i++) bins[i] = u8[i] - 256;
+              s.spectrum_data = bins;
+              s.peak_bin      = peak_bin;
+              s.bin_bandwidth = bin_bandwidth;
+              const idx = state.stations.indexOf(s);
+              const canvasId = `spec-canvas-${station.replace(/[^a-zA-Z0-9]/g, '_')}`;
+              drawMiniSpectrum(canvasId, s, idx);
+              updateSpectrumHints();
+              return;
+            }
+            chunks.push(value);
+            pump();
+          }).catch(err => console.warn('spectrum decompress error', err));
+        })();
       } catch (err) {
         console.warn('spectrum SSE parse error', err);
       }

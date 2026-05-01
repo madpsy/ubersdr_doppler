@@ -458,12 +458,16 @@ const AudioAnalysisModal = (() => {
       ctx.setLineDash([]);
     }
 
-    // X axis — real-world frequency labels across the passband
+    // X axis — real-world frequency labels across the passband (in kHz)
     const rawStep   = freqSpan / 6;
     const mag10     = Math.pow(10, Math.floor(Math.log10(Math.abs(rawStep) || 1)));
     const niceSteps = [1, 2, 5, 10, 20, 50, 100, 200, 500, 1000, 2000, 5000];
     let freqStep    = (niceSteps.find(v => v * mag10 >= rawStep) || 100) * mag10;
     if (freqStep < 1) freqStep = 1;
+
+    // Determine kHz decimal places based on step size:
+    // step >= 1000 Hz → 0 dp, step >= 100 Hz → 1 dp, step >= 10 Hz → 2 dp, else 3 dp
+    const khzDecimals = freqStep >= 1000 ? 0 : freqStep >= 100 ? 1 : freqStep >= 10 ? 2 : 3;
 
     ctx.font = '9px sans-serif';
     ctx.textAlign = 'center';
@@ -472,7 +476,7 @@ const AudioAnalysisModal = (() => {
       const x = ML + ((f - freqStart) / freqSpan) * plotW;
       if (x < ML || x > CW) continue;
       ctx.fillStyle = '#8b949e';
-      ctx.fillText(fmtHzLocal(f), x, CH - 3);
+      ctx.fillText((f / 1000).toFixed(khzDecimals), x, CH - 3);
       ctx.strokeStyle = '#21262d';
       ctx.lineWidth = 1;
       ctx.setLineDash([2, 2]);
@@ -481,7 +485,7 @@ const AudioAnalysisModal = (() => {
     }
     ctx.textAlign = 'right';
     ctx.fillStyle = '#555';
-    ctx.fillText('Hz', CW - 2, CH - 3);
+    ctx.fillText('kHz', CW - 2, CH - 3);
 
     // Expected carrier (green dashed) — nominal carrier frequency with no Doppler
     if (_showExpected && _carrierFreqHz >= freqStart && _carrierFreqHz <= freqEnd) {

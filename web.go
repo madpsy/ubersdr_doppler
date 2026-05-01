@@ -2,8 +2,11 @@
 package main
 
 import (
+	"bytes"
+	"compress/gzip"
 	"crypto/rand"
 	"embed"
+	"encoding/base64"
 	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
@@ -135,16 +138,44 @@ func (h *sseHub) broadcast(label string, r DopplerReading) {
 // broadcastSpectrum sends a spectrum update to all subscribed SSE clients.
 // Uses a named "spectrum" event so the client can handle it separately from
 // the default onmessage (Doppler reading) handler.
+//
+// Encoding pipeline (minimises payload size for 10 Hz SSE stream):
+//  1. float32 dBFS → uint8  (value = dBFS + 256; -256→0, 0→255)
+//  2. gzip compress          (spectrum data compresses very well, ~3–5×)
+//  3. base64-encode          (makes binary safe for SSE text transport)
+//
+// Typical result: ~200 raw bytes → ~60–80 gzip bytes → ~90 base64 chars
+// vs ~1500 bytes for a float32 JSON array — roughly 15–20× smaller.
 func (h *sseHub) broadcastSpectrum(label string, bins []float32, peakBin int, binBW float64) {
+	// Step 1: float32 dBFS → uint8
+	u8 := make([]byte, len(bins))
+	for i, v := range bins {
+		if v < -255 {
+			v = -255
+		} else if v > 0 {
+			v = 0
+		}
+		u8[i] = byte(int(v) + 256)
+	}
+
+	// Step 2: gzip compress
+	var buf bytes.Buffer
+	gz, _ := gzip.NewWriterLevel(&buf, gzip.BestSpeed)
+	_, _ = gz.Write(u8)
+	_ = gz.Close()
+
+	// Step 3: base64-encode
+	b64 := base64.StdEncoding.EncodeToString(buf.Bytes())
+
 	type payload struct {
-		Station      string    `json:"station"`
-		SpectrumData []float32 `json:"spectrum_data"`
-		PeakBin      int       `json:"peak_bin"`
-		BinBandwidth float64   `json:"bin_bandwidth"`
+		Station      string  `json:"station"`
+		SpectrumGZ   string  `json:"spectrum_gz"` // base64(gzip(uint8 bins))
+		PeakBin      int     `json:"peak_bin"`
+		BinBandwidth float64 `json:"bin_bandwidth"`
 	}
 	data, err := json.Marshal(payload{
 		Station:      label,
-		SpectrumData: bins,
+		SpectrumGZ:   b64,
 		PeakBin:      peakBin,
 		BinBandwidth: binBW,
 	})

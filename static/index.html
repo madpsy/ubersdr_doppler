@@ -60,26 +60,29 @@
         <span id="audio-fft-info" style="margin-left:16px;color:var(--muted);font-size:0.78rem"></span>
       </div>
 
-      <!-- FFT spectrum -->
-      <div class="audio-panel">
-        <div class="audio-panel-label">FFT Spectrum
-          <span class="audio-panel-hint">Real-world frequency axis · carrier = <span id="fft-carrier-label" style="color:var(--green)">—</span> · scroll to zoom · drag to pan · double-click to reset</span>
-          <span class="audio-panel-toggles">
-            <label class="checkbox-label" title="Show/hide expected (nominal) carrier line">
-              <input type="checkbox" id="fft-show-expected" checked> <span style="color:var(--green)">expected</span>
-            </label>
-            <label class="checkbox-label" title="Show/hide actual detected frequency line">
-              <input type="checkbox" id="fft-show-actual" checked> <span style="color:#f85149">actual</span>
-            </label>
-          </span>
+      <!-- Side-by-side panels -->
+      <div class="audio-panels-row">
+        <!-- FFT spectrum -->
+        <div class="audio-panel audio-panel-fft">
+          <div class="audio-panel-label">FFT Spectrum
+            <span class="audio-panel-hint">carrier = <span id="fft-carrier-label" style="color:var(--green)">—</span> · scroll to zoom · drag to pan · dbl-click reset</span>
+            <span class="audio-panel-toggles">
+              <label class="checkbox-label" title="Show/hide expected (nominal) carrier line">
+                <input type="checkbox" id="fft-show-expected" checked> <span style="color:var(--green)">expected</span>
+              </label>
+              <label class="checkbox-label" title="Show/hide actual detected frequency line">
+                <input type="checkbox" id="fft-show-actual" checked> <span style="color:#f85149">actual</span>
+              </label>
+            </span>
+          </div>
+          <canvas id="audio-fft-canvas" class="audio-canvas audio-canvas-fill" height="200"></canvas>
         </div>
-        <canvas id="audio-fft-canvas" class="audio-canvas" height="160"></canvas>
-      </div>
 
-      <!-- 60-second signal + SNR graph -->
-      <div class="audio-panel">
-        <div class="audio-panel-label">60-second Signal History</div>
-        <canvas id="audio-history-canvas" class="audio-canvas" height="130"></canvas>
+        <!-- 60-second signal + SNR graph -->
+        <div class="audio-panel audio-panel-history">
+          <div class="audio-panel-label">60-second Signal History</div>
+          <canvas id="audio-history-canvas" class="audio-canvas audio-canvas-fill" height="200"></canvas>
+        </div>
       </div>
     </div>
   </div>

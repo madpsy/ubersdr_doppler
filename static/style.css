@@ -178,7 +178,7 @@ td { font-variant-numeric: tabular-nums; }
 
 /* ── Audio analysis modal ─────────────────────────────────────────────────── */
 .audio-modal-box {
-  max-width: 820px !important;
+  max-width: 1200px !important;
   width: 96vw !important;
 }
 .audio-modal-header {
@@ -209,8 +209,35 @@ td { font-variant-numeric: tabular-nums; }
 .audio-status-live       { color: var(--green);  }
 .audio-status-error      { color: var(--red);    }
 
+/* Side-by-side panels row */
+.audio-panels-row {
+  display: flex;
+  gap: 12px;
+  align-items: stretch;
+  margin-bottom: 14px;
+}
+.audio-panel-fft {
+  flex: 3;   /* FFT gets ~60% width */
+  min-width: 0;
+}
+.audio-panel-history {
+  flex: 2;   /* history gets ~40% width */
+  min-width: 0;
+}
+
 .audio-panel {
   margin-bottom: 14px;
+  display: flex;
+  flex-direction: column;
+}
+/* Panels inside the row share the row's bottom margin — remove their own */
+.audio-panels-row > .audio-panel {
+  margin-bottom: 0;
+}
+/* Canvas that stretches to fill its panel vertically */
+.audio-canvas-fill {
+  flex: 1;
+  min-height: 180px;
 }
 .audio-panel-label {
   font-size: 0.78rem;
