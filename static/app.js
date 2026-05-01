@@ -29,6 +29,50 @@ const state = {
     passwordConfigured: false,
     authenticated: false,
   },
+  audioPlaying: null,    // label of station currently being previewed, or null
+  audioElement: null,    // <audio> element for preview
+};
+
+// ---------------------------------------------------------------------------
+// Audio preview
+// ---------------------------------------------------------------------------
+window.toggleAudioPreview = function(label) {
+  if (state.audioPlaying === label) {
+    // Stop current preview
+    if (state.audioElement) {
+      state.audioElement.pause();
+      state.audioElement.src = '';
+      state.audioElement = null;
+    }
+    state.audioPlaying = null;
+    renderStatusTable();
+    return;
+  }
+
+  // Stop any existing preview
+  if (state.audioElement) {
+    state.audioElement.pause();
+    state.audioElement.src = '';
+    state.audioElement = null;
+  }
+
+  // Start new preview
+  const audio = new Audio(`${BASE}/api/audio/preview?station=${encodeURIComponent(label)}`);
+  audio.play().catch(e => console.warn('audio preview failed:', e));
+  audio.onended = () => {
+    state.audioPlaying = null;
+    state.audioElement = null;
+    renderStatusTable();
+  };
+  audio.onerror = () => {
+    console.warn('audio preview error for', label);
+    state.audioPlaying = null;
+    state.audioElement = null;
+    renderStatusTable();
+  };
+  state.audioPlaying = label;
+  state.audioElement = audio;
+  renderStatusTable();
 };
 
 // ---------------------------------------------------------------------------
@@ -194,11 +238,12 @@ function renderStatusTable() {
       <th>Signal</th>
       <th>Noise Floor</th>
       <th>Updated (UTC)</th>
-      <th>State</th>`;
+      <th>State</th>
+      <th>Preview</th>`;
   }
 
   if (state.stations.length === 0) {
-    const cols = showRef ? 10 : 9;
+    const cols = showRef ? 11 : 10;
     tbody.innerHTML = `<tr><td colspan="${cols}" class="loading">No stations configured — add one below.</td></tr>`;
     return;
   }
@@ -208,6 +253,7 @@ function renderStatusTable() {
     const valid = r.valid;
     const colour = colourForIndex(i);
     const isRef = s.config && s.config.is_reference;
+    const label = s.config.label;
 
     const dHz   = valid ? fmtDoppler(r.doppler_hz) : '—';
     const cls   = valid ? dopplerClass(r.doppler_hz) : 'invalid';
@@ -241,9 +287,11 @@ function renderStatusTable() {
     }
 
     const refBadge = isRef ? ' <span class="ref-badge">REF</span>' : '';
+    const isPlaying = state.audioPlaying === label;
+    const previewBtn = `<button class="btn btn-secondary btn-sm" onclick="toggleAudioPreview('${label}')">${isPlaying ? '⏹ Stop' : '▶ Listen'}</button>`;
 
     return `<tr>
-      <td><span class="station-dot" style="background:${colour}"></span><strong>${s.config.label}</strong>${refBadge}</td>
+      <td><span class="station-dot" style="background:${colour}"></span><strong>${label}</strong>${refBadge}</td>
       <td>${fmtHz(s.config.freq_hz)}</td>
       <td class="${cls}">${dHz}</td>
       ${corrCell}
@@ -253,8 +301,129 @@ function renderStatusTable() {
       <td>${noise}</td>
       <td>${ts}</td>
       <td>${stateTxt}</td>
+      <td>${previewBtn}</td>
     </tr>`;
   }).join('');
+}
+
+// ---------------------------------------------------------------------------
+// Mini spectrum display — one canvas per station showing the 1 kHz window
+// Matches UberSDR's frequency reference monitor display style.
+// ---------------------------------------------------------------------------
+
+function drawMiniSpectra() {
+  const container = document.getElementById('mini-spectra');
+  if (!container) return;
+
+  if (state.stations.length === 0) {
+    container.innerHTML = '<p style="color:var(--muted)">No stations configured.</p>';
+    return;
+  }
+
+  // Create or reuse canvas elements
+  state.stations.forEach((s, i) => {
+    const label = s.config.label;
+    const canvasId = `spec-canvas-${label.replace(/[^a-zA-Z0-9]/g, '_')}`;
+    let wrapper = document.getElementById(`spec-wrap-${canvasId}`);
+    if (!wrapper) {
+      wrapper = document.createElement('div');
+      wrapper.id = `spec-wrap-${canvasId}`;
+      wrapper.style.cssText = 'margin-bottom:16px';
+      wrapper.innerHTML = `
+        <div style="font-size:0.82rem;color:var(--muted);margin-bottom:4px">
+          <span class="station-dot" style="background:${colourForIndex(i)};display:inline-block;width:10px;height:10px;border-radius:50%;margin-right:6px;vertical-align:middle"></span>
+          <strong style="color:var(--text)">${label}</strong>
+          <span style="margin-left:8px">${fmtHz(s.config.freq_hz)}</span>
+          <span id="spec-info-${canvasId}" style="margin-left:12px;color:var(--accent)"></span>
+        </div>
+        <canvas id="${canvasId}" width="500" height="80" style="width:100%;height:80px;background:var(--bg);border-radius:4px;border:1px solid var(--border)"></canvas>`;
+      container.appendChild(wrapper);
+    }
+    drawMiniSpectrum(canvasId, s, i);
+  });
+}
+
+function drawMiniSpectrum(canvasId, s, stationIdx) {
+  const canvas = document.getElementById(canvasId);
+  if (!canvas) return;
+  const ctx = canvas.getContext('2d');
+  const W = canvas.width;
+  const H = canvas.height;
+
+  ctx.clearRect(0, 0, W, H);
+  ctx.fillStyle = '#0d1117';
+  ctx.fillRect(0, 0, W, H);
+
+  const spectrum = s.spectrum_data;
+  const peakBin = s.peak_bin !== undefined ? s.peak_bin : -1;
+  const infoEl = document.getElementById(`spec-info-${canvasId}`);
+
+  if (!spectrum || spectrum.length === 0) {
+    ctx.fillStyle = '#8b949e';
+    ctx.font = '11px sans-serif';
+    ctx.textAlign = 'center';
+    ctx.fillText('Waiting for spectrum data…', W / 2, H / 2);
+    if (infoEl) infoEl.textContent = '';
+    return;
+  }
+
+  const n = spectrum.length;
+
+  // Find min/max for scaling
+  let minVal = spectrum[0], maxVal = spectrum[0];
+  for (let i = 1; i < n; i++) {
+    if (spectrum[i] < minVal) minVal = spectrum[i];
+    if (spectrum[i] > maxVal) maxVal = spectrum[i];
+  }
+  const range = maxVal - minVal || 1;
+
+  // Draw spectrum bars
+  const colour = colourForIndex(stationIdx);
+  ctx.fillStyle = colour + '88';
+  for (let i = 0; i < n; i++) {
+    const x = (i / n) * W;
+    const barW = Math.max(1, W / n);
+    const barH = ((spectrum[i] - minVal) / range) * (H - 4);
+    ctx.fillRect(x, H - barH, barW, barH);
+  }
+
+  // Draw centre line (nominal carrier frequency — green dashed)
+  const centreX = W / 2;
+  ctx.strokeStyle = '#3fb950';
+  ctx.lineWidth = 1;
+  ctx.setLineDash([3, 3]);
+  ctx.beginPath();
+  ctx.moveTo(centreX, 0);
+  ctx.lineTo(centreX, H);
+  ctx.stroke();
+  ctx.setLineDash([]);
+
+  // Draw peak marker (red solid) if valid signal
+  if (peakBin >= 0 && peakBin < n) {
+    const peakX = (peakBin / n) * W;
+    ctx.strokeStyle = '#f85149';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(peakX, 0);
+    ctx.lineTo(peakX, H);
+    ctx.stroke();
+
+    // Update info label
+    if (infoEl && s.current && s.current.valid) {
+      const dHz = s.current.doppler_hz;
+      const sign = dHz >= 0 ? '+' : '';
+      infoEl.textContent = `${sign}${dHz.toFixed(3)} Hz  SNR: ${s.current.snr_db.toFixed(1)} dB`;
+      infoEl.style.color = Math.abs(dHz) < 0.5 ? 'var(--green)' : 'var(--accent)';
+    } else if (infoEl) {
+      infoEl.textContent = 'No signal';
+      infoEl.style.color = 'var(--muted)';
+    }
+  } else {
+    if (infoEl) {
+      infoEl.textContent = 'No signal';
+      infoEl.style.color = 'var(--muted)';
+    }
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -544,17 +713,52 @@ function connectSSE() {
   setConnStatus('connecting');
   const es = new EventSource(BASE + '/api/events');
 
+  // Named events from the server
+  es.addEventListener('connected',  () => setConnStatus('connected'));
+  es.addEventListener('heartbeat',  () => setConnStatus('connected'));
   es.onopen = () => setConnStatus('connected');
 
+  // Throttle spectrum refresh — at most once per 2 seconds
+  let spectrumRefreshPending = false;
+  const scheduleSpectrumRefresh = () => {
+    if (spectrumRefreshPending) return;
+    spectrumRefreshPending = true;
+    setTimeout(async () => {
+      spectrumRefreshPending = false;
+      try {
+        const r = await apiFetch('/api/stations');
+        const data = await r.json() || [];
+        // Merge spectrum_data and peak_bin into existing station objects
+        data.forEach(d => {
+          const s = state.stations.find(x => x.config && x.config.label === d.config.label);
+          if (s) {
+            s.spectrum_data = d.spectrum_data;
+            s.peak_bin = d.peak_bin;
+          }
+        });
+        drawMiniSpectra();
+      } catch (e) {
+        console.warn('spectrum refresh failed', e);
+      }
+    }, 2000);
+  };
+
   es.onmessage = e => {
+    setConnStatus('connected');
     try {
       const { station, reading } = JSON.parse(e.data);
       const s = state.stations.find(x => x.config && x.config.label === station);
       if (s) {
         s.current = reading;
         renderStatusTable();
+        // Redraw mini spectrum with current reading info (uses cached spectrum_data)
+        const i = state.stations.indexOf(s);
+        const canvasId = `spec-canvas-${station.replace(/[^a-zA-Z0-9]/g, '_')}`;
+        drawMiniSpectrum(canvasId, s, i);
       }
       appendLivePoint(station, reading);
+      // Periodically refresh spectrum data from server
+      scheduleSpectrumRefresh();
     } catch (err) {
       console.warn('SSE parse error', err);
     }
@@ -615,6 +819,7 @@ async function loadStations() {
   renderStatusTable();
   renderStationList();
   populateDownloadSelect();
+  drawMiniSpectra();
 }
 
 // Modal helpers

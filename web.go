@@ -4,9 +4,11 @@ package main
 import (
 	"crypto/rand"
 	"embed"
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"html/template"
 	"io/fs"
 	"log"
 	"net/http"
@@ -14,7 +16,6 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
-	"text/template"
 	"time"
 )
 
@@ -269,6 +270,13 @@ func startHTTPServer(
 		client := hub.subscribe(label)
 		defer hub.unsubscribe(client)
 
+		// Send an immediate named "connected" event so the client knows the
+		// SSE connection is live even before any station readings arrive.
+		// Named events (event: connected) trigger addEventListener listeners
+		// and also onmessage in browsers that support it.
+		fmt.Fprint(w, "event: connected\ndata: {}\n\n")
+		flusher.Flush()
+
 		ticker := time.NewTicker(15 * time.Second)
 		defer ticker.Stop()
 
@@ -281,7 +289,9 @@ func startHTTPServer(
 				fmt.Fprint(w, msg)
 				flusher.Flush()
 			case <-ticker.C:
-				fmt.Fprint(w, ": heartbeat\n\n")
+				// Named heartbeat event (not a comment) so the client can
+				// use addEventListener('heartbeat') to confirm liveness.
+				fmt.Fprint(w, "event: heartbeat\ndata: {}\n\n")
 				flusher.Flush()
 			case <-r.Context().Done():
 				return
@@ -344,6 +354,8 @@ func startHTTPServer(
 			BaselineMean     *float64       `json:"baseline_mean_hz"`
 			BaselineN        int            `json:"baseline_n"`
 			CorrectedDoppler *float64       `json:"corrected_doppler_hz"`
+			SpectrumData     []float32      `json:"spectrum_data"` // latest unwrapped FFT bins for mini-spectrum display
+			PeakBin          int            `json:"peak_bin"`      // peak bin index (-1 if no valid signal)
 		}
 		refHz, refValid := mgr.referenceCorrection()
 		settingsMu.RLock()
@@ -370,12 +382,15 @@ func startHTTPServer(
 					corrPtr = &corr
 				}
 			}
+			specBins, peakBin := ds.LatestSpectrum()
 			out = append(out, stationStatus{
 				Config:           ds.cfg,
 				Current:          cur,
 				BaselineMean:     meanPtr,
 				BaselineN:        n,
 				CorrectedDoppler: corrPtr,
+				SpectrumData:     specBins,
+				PeakBin:          peakBin,
 			})
 		}
 		jsonResponse(w, out)
@@ -535,6 +550,68 @@ func startHTTPServer(
 		http.ServeContent(w, r, filepath.Base(matchPath), t, f)
 	})
 
+	// ── Audio preview ──────────────────────────────────────────────────────
+	// GET /api/audio/preview?station=<label>
+	// Streams a live WAV audio preview of the station's carrier frequency.
+	// The audio connection is established on demand and dropped when the
+	// client disconnects. Useful for verifying the carrier is receivable.
+	mux.HandleFunc("/api/audio/preview", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		label := r.URL.Query().Get("station")
+		if label == "" {
+			http.Error(w, "station parameter required", http.StatusBadRequest)
+			return
+		}
+		var target *DopplerStation
+		for _, ds := range mgr.list() {
+			if ds.cfg.Label == label {
+				target = ds
+				break
+			}
+		}
+		if target == nil {
+			http.Error(w, "station not found", http.StatusNotFound)
+			return
+		}
+
+		// Get sample rate (default 12000 if not yet known)
+		target.streamMu.RLock()
+		sr := target.streamSampleRate
+		target.streamMu.RUnlock()
+		if sr == 0 {
+			sr = 12000
+		}
+
+		writeStreamingWAVHeader(w, sr, 1)
+		flusher, ok := w.(http.Flusher)
+		if ok {
+			flusher.Flush()
+		}
+
+		audioCh := target.audioHub.subscribe()
+		defer target.audioHub.unsubscribe(audioCh)
+
+		for {
+			select {
+			case <-r.Context().Done():
+				return
+			case chunk, ok := <-audioCh:
+				if !ok {
+					return
+				}
+				if _, err := w.Write(chunk); err != nil {
+					return
+				}
+				if flusher != nil {
+					flusher.Flush()
+				}
+			}
+		}
+	})
+
 	log.Printf("[web] listening on %s (write actions: %s)", addr, func() string {
 		if uiPassword == "" {
 			return "disabled — set UI_PASSWORD"
@@ -550,4 +627,39 @@ func jsonResponse(w http.ResponseWriter, v interface{}) {
 	if err := json.NewEncoder(w).Encode(v); err != nil {
 		log.Printf("[web] json encode: %v", err)
 	}
+}
+
+// ---------------------------------------------------------------------------
+// WAV streaming helpers (for live audio preview)
+// ---------------------------------------------------------------------------
+
+// writeStreamingWAVHeader writes a streaming WAV header with a near-infinite
+// data size so the browser can play it as a live stream.
+func writeStreamingWAVHeader(w http.ResponseWriter, sampleRate, channels int) {
+	const maxSize = 0x7FFFFFFF
+	bitsPerSample := 16
+	byteRate := sampleRate * channels * bitsPerSample / 8
+	blockAlign := channels * bitsPerSample / 8
+	dataSize := uint32(maxSize - 36)
+
+	hdr := make([]byte, 44)
+	copy(hdr[0:4], "RIFF")
+	binary.LittleEndian.PutUint32(hdr[4:], uint32(maxSize))
+	copy(hdr[8:12], "WAVE")
+	copy(hdr[12:16], "fmt ")
+	binary.LittleEndian.PutUint32(hdr[16:], 16)
+	binary.LittleEndian.PutUint16(hdr[20:], 1) // PCM
+	binary.LittleEndian.PutUint16(hdr[22:], uint16(channels))
+	binary.LittleEndian.PutUint32(hdr[24:], uint32(sampleRate))
+	binary.LittleEndian.PutUint32(hdr[28:], uint32(byteRate))
+	binary.LittleEndian.PutUint16(hdr[32:], uint16(blockAlign))
+	binary.LittleEndian.PutUint16(hdr[34:], uint16(bitsPerSample))
+	copy(hdr[36:40], "data")
+	binary.LittleEndian.PutUint32(hdr[40:], dataSize)
+
+	w.Header().Set("Content-Type", "audio/wav")
+	w.Header().Set("Transfer-Encoding", "chunked")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(hdr)
 }
