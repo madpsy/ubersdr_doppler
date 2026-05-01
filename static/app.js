@@ -38,7 +38,14 @@ const state = {
   },
   audioPlaying: null,    // label of station currently being previewed, or null
   audioElement: null,    // <audio> element for preview
+  // Per-station wall-clock time of the last SSE message received from the backend.
+  // Used to detect backend→UberSDR connection staleness independently of reading.valid.
+  lastServerTime: {},    // label → Date
 };
+
+// Staleness threshold: if no SSE message has arrived for a station in this many
+// milliseconds we consider the backend→UberSDR connection stale.
+const STALE_MS = 10000;
 
 // ---------------------------------------------------------------------------
 // Audio preview — opens the analysis modal
@@ -210,10 +217,22 @@ function setConnStatus(status) {
 // ---------------------------------------------------------------------------
 // Status table
 // ---------------------------------------------------------------------------
+
+// Returns a human-readable "X ago" string for a Date, or null if t is falsy.
+function fmtAgo(t) {
+  if (!t) return null;
+  const secs = Math.round((Date.now() - t.getTime()) / 1000);
+  if (secs < 5)  return null;          // fresh — don't clutter
+  if (secs < 60) return `${secs}s ago`;
+  const mins = Math.round(secs / 60);
+  return `${mins}m ago`;
+}
+
 function renderStatusTable() {
   const tbody = document.getElementById('status-tbody');
   const thead = document.querySelector('#status-table thead tr');
   const showRef = hasReference();
+  const now = Date.now();
 
   // Show/hide the "Reference" chart checkbox based on whether a ref station exists
   const refLabel = document.getElementById('show-ref-label');
@@ -247,12 +266,27 @@ function renderStatusTable() {
     const isRef = s.config && s.config.is_reference;
     const label = s.config.label;
 
+    // Staleness: based on when the backend last sent us a message for this station.
+    const lastSeen = state.lastServerTime[label];
+    const stale = lastSeen ? (now - lastSeen.getTime()) > STALE_MS : false;
+
     const dHz   = valid ? fmtDoppler(r.doppler_hz) : '—';
     const cls   = valid ? dopplerClass(r.doppler_hz) : 'invalid';
     const snr   = valid ? r.snr_db.toFixed(1) + ' dB' : '—';
     const sig   = valid ? r.signal_dbfs.toFixed(1) + ' dBFS' : '—';
     const noise = valid ? r.noise_dbfs.toFixed(1) + ' dBFS' : '—';
-    const ts    = r.timestamp ? fmtUTC(r.timestamp) : '—';
+
+    // Timestamp cell: show UTC time + stale badge if data has gone quiet
+    let tsHtml;
+    if (!r.timestamp) {
+      tsHtml = '—';
+    } else {
+      const agoStr = fmtAgo(lastSeen);
+      const staleBadge = stale
+        ? `<span class="stale-badge" title="No update from backend for ${agoStr || '?'}">STALE</span>`
+        : '';
+      tsHtml = fmtUTC(r.timestamp) + staleBadge;
+    }
 
     let corrCell = '';
     if (showRef) {
@@ -271,19 +305,44 @@ function renderStatusTable() {
       baselineCell = `<td style="color:var(--muted)">${fmtDoppler(s.baseline_mean_hz)}</td>`;
     }
 
-    let stateTxt = '<span class="state-nosig">No signal</span>';
-    if (valid) {
-      if (r.snr_db >= 20) stateTxt = '<span class="state-ok">Good</span>';
-      else if (r.snr_db >= 10) stateTxt = '<span class="state-weak">Weak</span>';
-      else stateTxt = '<span class="state-weak">Marginal</span>';
+    // State cell — stale takes priority over no-signal
+    let stateTxt;
+    if (stale) {
+      const agoStr = fmtAgo(lastSeen) || 'unknown';
+      stateTxt = `<span class="state-stale" title="Backend has not sent data for ${agoStr}">⚠ Stale (${agoStr})</span>`;
+    } else if (!valid) {
+      stateTxt = '<span class="state-nosig">● No signal</span>';
+    } else if (r.snr_db >= 20) {
+      stateTxt = '<span class="state-ok">● Good</span>';
+    } else if (r.snr_db >= 10) {
+      stateTxt = '<span class="state-weak">● Weak</span>';
+    } else {
+      stateTxt = '<span class="state-weak">● Marginal</span>';
     }
+
+    // Per-station backend connection dot (shown next to the station name)
+    let dotClass = 'backend-dot-ok';
+    let dotTitle = 'Backend receiving data';
+    if (stale) {
+      dotClass = 'backend-dot-stale';
+      dotTitle = 'Backend data stale — UberSDR connection may be lost';
+    } else if (!valid) {
+      dotClass = 'backend-dot-nosig';
+      dotTitle = 'Signal below SNR threshold';
+    }
+    const backendDot = `<span class="backend-dot ${dotClass}" title="${dotTitle}"></span>`;
+
+    // Row-level CSS class
+    let rowClass = '';
+    if (stale)       rowClass = 'row-stale';
+    else if (!valid) rowClass = 'row-nosig';
 
     const refBadge = isRef ? ' <span class="ref-badge">REF</span>' : '';
     const isPlaying = state.audioPlaying === label;
     const previewBtn = `<button class="btn btn-secondary btn-sm" onclick="toggleAudioPreview('${label}')">${isPlaying ? '⏹ Stop' : '▶ Listen'}</button>`;
 
-    return `<tr>
-      <td><span class="station-dot" style="background:${colour}"></span><strong>${label}</strong>${refBadge}</td>
+    return `<tr class="${rowClass}">
+      <td><span class="station-dot" style="background:${colour}"></span><strong>${label}</strong>${refBadge}${backendDot}</td>
       <td>${fmtHz(s.config.freq_hz)}</td>
       <td class="${cls}">${dHz}</td>
       ${corrCell}
@@ -291,7 +350,7 @@ function renderStatusTable() {
       <td>${snr}</td>
       <td>${sig}</td>
       <td>${noise}</td>
-      <td>${ts}</td>
+      <td>${tsHtml}</td>
       <td>${stateTxt}</td>
       <td>${previewBtn}</td>
     </tr>`;
@@ -751,7 +810,7 @@ function initCharts() {
         }
         ctx.restore();
       },
-    }],
+    }, gapAnnotationPlugin],
   });
 
   // ── Panel 2: SNR ──────────────────────────────────────────────────────────
@@ -1101,7 +1160,12 @@ function connectSSE() {
       retryDelay = 1000;
       setConnStatus('connected');
       try {
-        const { station, reading } = JSON.parse(e.data);
+        const { station, reading, server_time } = JSON.parse(e.data);
+        // Record the wall-clock time of this backend message for staleness detection.
+        // Use server_time if present (added in web.go broadcast), otherwise fall back
+        // to local Date.now() so older backends still work.
+        state.lastServerTime[station] = server_time ? new Date(server_time) : new Date();
+
         const s = state.stations.find(x => x.config && x.config.label === station);
         if (s) {
           s.current = reading;
@@ -1254,6 +1318,99 @@ window.removeStation = async function(label) {
 };
 
 // ---------------------------------------------------------------------------
+// Staleness ticker — re-renders the status table every 5 s so the "X ago"
+// labels and stale highlights stay current even when no new SSE messages arrive.
+// ---------------------------------------------------------------------------
+function startStalenessTicker() {
+  setInterval(() => {
+    if (state.stations.length > 0) renderStatusTable();
+  }, 5000);
+}
+
+// ---------------------------------------------------------------------------
+// Chart.js plugin — "signal lost" gap annotations
+//
+// Scans the primary Doppler dataset for each station and draws a semi-
+// transparent red vertical band over any contiguous run of null y-values
+// that spans ≥ 60 seconds.  This makes outages visible at a glance on the
+// history chart without adding extra datasets.
+// ---------------------------------------------------------------------------
+const gapAnnotationPlugin = {
+  id: 'gapAnnotation',
+  afterDraw(chart) {
+    // Only apply to the Doppler chart (it has a 'zeroLine' plugin registered)
+    if (!chart.options.plugins || !chart.options.plugins.legend) return;
+    const xScale = chart.scales.x;
+    const yScale = chart.scales.y;
+    if (!xScale || !yScale) return;
+
+    const ctx = chart.ctx;
+    const GAP_MIN_MS = 60 * 1000; // only annotate gaps ≥ 1 minute
+
+    ctx.save();
+    // Clip to the plot area so bands don't bleed into the axes
+    ctx.beginPath();
+    ctx.rect(xScale.left, yScale.top, xScale.right - xScale.left, yScale.bottom - yScale.top);
+    ctx.clip();
+
+    chart.data.datasets.forEach(ds => {
+      // Only annotate the mean-line datasets (not band datasets)
+      if (ds._isBand) return;
+      const data = ds.data;
+      if (!data || data.length < 2) return;
+
+      let gapStart = null;
+      for (let i = 0; i < data.length; i++) {
+        const pt = data[i];
+        const isNull = pt.y === null || pt.y === undefined;
+        if (isNull && gapStart === null) {
+          // Gap begins — record the timestamp of the last valid point before it
+          gapStart = pt.x instanceof Date ? pt.x.getTime() : new Date(pt.x).getTime();
+        } else if (!isNull && gapStart !== null) {
+          // Gap ends
+          const gapEnd = pt.x instanceof Date ? pt.x.getTime() : new Date(pt.x).getTime();
+          if (gapEnd - gapStart >= GAP_MIN_MS) {
+            const x1 = xScale.getPixelForValue(gapStart);
+            const x2 = xScale.getPixelForValue(gapEnd);
+            ctx.fillStyle = 'rgba(248,81,73,0.10)';
+            ctx.fillRect(x1, yScale.top, x2 - x1, yScale.bottom - yScale.top);
+            // Draw a small "No signal" label at the top of the band if wide enough
+            const bandW = x2 - x1;
+            if (bandW > 30) {
+              ctx.fillStyle = 'rgba(248,81,73,0.55)';
+              ctx.font = '9px sans-serif';
+              ctx.textAlign = 'center';
+              ctx.fillText('No signal', x1 + bandW / 2, yScale.top + 10);
+            }
+          }
+          gapStart = null;
+        }
+      }
+      // Handle a gap that runs to the end of the data
+      if (gapStart !== null) {
+        const lastPt = data[data.length - 1];
+        const gapEnd = lastPt.x instanceof Date ? lastPt.x.getTime() : new Date(lastPt.x).getTime();
+        if (gapEnd - gapStart >= GAP_MIN_MS) {
+          const x1 = xScale.getPixelForValue(gapStart);
+          const x2 = xScale.getPixelForValue(gapEnd);
+          ctx.fillStyle = 'rgba(248,81,73,0.10)';
+          ctx.fillRect(x1, yScale.top, x2 - x1, yScale.bottom - yScale.top);
+          const bandW = x2 - x1;
+          if (bandW > 30) {
+            ctx.fillStyle = 'rgba(248,81,73,0.55)';
+            ctx.font = '9px sans-serif';
+            ctx.textAlign = 'center';
+            ctx.fillText('No signal', x1 + bandW / 2, yScale.top + 10);
+          }
+        }
+      }
+    });
+
+    ctx.restore();
+  },
+};
+
+// ---------------------------------------------------------------------------
 // Init
 // ---------------------------------------------------------------------------
 // Send the chosen spectrum interval to the server for this SSE connection.
@@ -1276,6 +1433,7 @@ async function applySpecInterval(intervalS) {
 document.addEventListener('DOMContentLoaded', async () => {
   initCharts();
   startSpecRenderLoop();
+  startStalenessTicker();
   await checkAuthStatus();
   await loadSettings();
   await loadStations();

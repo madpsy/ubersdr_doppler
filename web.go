@@ -134,10 +134,11 @@ func (h *sseHub) unsubscribe(c *sseClient) {
 // broadcast sends a live reading to all subscribed SSE clients.
 func (h *sseHub) broadcast(label string, r DopplerReading) {
 	type payload struct {
-		Station string         `json:"station"`
-		Reading DopplerReading `json:"reading"`
+		Station    string         `json:"station"`
+		Reading    DopplerReading `json:"reading"`
+		ServerTime time.Time      `json:"server_time"` // wall-clock time of this broadcast; used by the frontend to detect backend→UberSDR staleness
 	}
-	data, err := json.Marshal(payload{Station: label, Reading: r})
+	data, err := json.Marshal(payload{Station: label, Reading: r, ServerTime: time.Now().UTC()})
 	if err != nil {
 		return
 	}
