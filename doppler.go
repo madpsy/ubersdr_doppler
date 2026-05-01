@@ -261,9 +261,11 @@ type DopplerStation struct {
 	hub       *sseHub
 	csvWriter *csvWriter
 
-	// refProvider returns the current reference station Doppler correction (Hz)
-	// and whether it is valid. Set by stationManager after creation.
-	refProvider func() (float64, bool)
+	// refProvider returns the current reference station clock error in ppm
+	// (dopplerHz / refFreqHz * 1e6) and whether it is valid.
+	// Callers must scale by their own station frequency: corrected = raw - ppm*stationFreq/1e6
+	// Set by stationManager after creation.
+	refProvider func() (ppm float64, valid bool)
 
 	// audioHub fans out PCM audio to preview listeners.
 	audioHub *audioBroadcastHub
@@ -631,10 +633,12 @@ func (ds *DopplerStation) runSpectrumLoop(ctx context.Context) {
 				ds.sampleMu.Unlock()
 			}
 
-			// Attach reference correction before broadcasting to SSE clients
+			// Attach reference correction before broadcasting to SSE clients.
+			// The refProvider returns the reference station's clock error in ppm,
+			// which we scale to this station's frequency before subtracting.
 			if reading.Valid && ds.refProvider != nil && !ds.cfg.IsReference {
-				if refHz, ok := ds.refProvider(); ok {
-					c := reading.DopplerHz - refHz
+				if refPPM, ok := ds.refProvider(); ok {
+					c := reading.DopplerHz - refPPM*float64(ds.cfg.FreqHz)/1e6
 					reading.CorrectedDopplerHz = &c
 				}
 			}
@@ -969,8 +973,8 @@ func (ds *DopplerStation) aggregateMinute() {
 		c := sumCorrected / float64(correctedCount)
 		mean.CorrectedDopplerHz = &c
 	} else if ds.refProvider != nil && !ds.cfg.IsReference {
-		if refHz, ok := ds.refProvider(); ok {
-			c := mean.DopplerHz - refHz
+		if refPPM, ok := ds.refProvider(); ok {
+			c := mean.DopplerHz - refPPM*float64(ds.cfg.FreqHz)/1e6
 			mean.CorrectedDopplerHz = &c
 		}
 	}
@@ -1115,15 +1119,17 @@ func (m *stationManager) list() []*DopplerStation {
 	return out
 }
 
-// referenceCorrection returns the current Doppler reading of the reference station.
-func (m *stationManager) referenceCorrection() (dopplerHz float64, valid bool) {
+// referenceCorrection returns the current clock error of the reference station in ppm.
+// ppm = dopplerHz / refFreqHz * 1e6
+// Callers scale this to their own frequency: corrected = raw - ppm*stationFreq/1e6
+func (m *stationManager) referenceCorrection() (ppm float64, valid bool) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	for _, ds := range m.stations {
 		if ds.cfg.IsReference {
 			r := ds.CurrentReading()
-			if r.Valid {
-				return r.DopplerHz, true
+			if r.Valid && ds.cfg.FreqHz > 0 {
+				return r.DopplerHz / float64(ds.cfg.FreqHz) * 1e6, true
 			}
 			return 0, false
 		}

@@ -358,7 +358,7 @@ func startHTTPServer(
 			PeakBin          int            `json:"peak_bin"`      // peak bin index (-1 if no valid signal)
 			BinBandwidth     float64        `json:"bin_bandwidth"` // actual Hz per bin (from server config message)
 		}
-		refHz, refValid := mgr.referenceCorrection()
+		refPPM, refValid := mgr.referenceCorrection()
 		settingsMu.RLock()
 		manualOffset := settings.ManualOffsetHz
 		settingsMu.RUnlock()
@@ -376,7 +376,8 @@ func startHTTPServer(
 			if cur.Valid && !ds.cfg.IsReference {
 				corr := cur.DopplerHz
 				if refValid {
-					corr -= refHz
+					// Scale reference ppm error to this station's frequency
+					corr -= refPPM * float64(ds.cfg.FreqHz) / 1e6
 				}
 				corr -= manualOffset
 				if refValid || manualOffset != 0 {
