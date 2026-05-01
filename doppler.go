@@ -237,13 +237,14 @@ func (h *audioBroadcastHub) hasListeners() bool {
 // ---------------------------------------------------------------------------
 
 const (
-	// Spectrum channel parameters — 500 bins × 2 Hz/bin = 1 kHz window.
-	// This matches UberSDR's own FrequencyReferenceMonitor exactly.
-	// The server now accepts 2 Hz/bin (same as it uses internally).
+	// Spectrum channel parameters — 200 bins × 0.5 Hz/bin = 100 Hz window.
+	// 0.5 Hz/bin gives ~0.01 Hz centroid precision at SNR 20 dB (4× better than 2 Hz/bin).
+	// radiod FFT mode: fft_size ≈ 1500 (goodchoice, samprate = 750 Hz), frame time ≈ 2 s.
+	// Measurements update every ~2 seconds; minute means still get ~30 samples.
 	// We always read the actual binBandwidth back from the server's "config"
 	// message in case it snaps to a different value.
-	specBinCount     = 500
-	specBinBandwidth = 2.0 // Hz/bin — same as UberSDR FrequencyReferenceMonitor
+	specBinCount     = 200
+	specBinBandwidth = 0.5 // Hz/bin — 4× finer than UberSDR FrequencyReferenceMonitor default
 
 	// History depth for minute-means (24 hours × 60 minutes).
 	historyDepth = 24 * 60
@@ -1150,7 +1151,13 @@ func (m *stationManager) add(cfg stationConfig) (*DopplerStation, error) {
 		cfg.MinSNR = 10.0
 	}
 	if cfg.MaxDriftHz == 0 {
-		cfg.MaxDriftHz = 100.0
+		cfg.MaxDriftHz = 50.0
+	}
+	// Clamp maxDriftHz to the spectrum window half-width so the search range
+	// never exceeds what the spectrum can actually see.
+	maxWindow := float64(specBinCount) / 2.0 * specBinBandwidth // 50 Hz
+	if cfg.MaxDriftHz > maxWindow {
+		cfg.MaxDriftHz = maxWindow
 	}
 	cfg.Enabled = true
 
@@ -1212,6 +1219,13 @@ func (m *stationManager) update(id string, cfg stationConfig) error {
 		return fmt.Errorf("station id %q not found", id)
 	}
 	cfg.ID = id
+	// Clamp maxDriftHz to the spectrum window half-width
+	maxWindow := float64(specBinCount) / 2.0 * specBinBandwidth // 50 Hz
+	if cfg.MaxDriftHz <= 0 {
+		cfg.MaxDriftHz = maxWindow
+	} else if cfg.MaxDriftHz > maxWindow {
+		cfg.MaxDriftHz = maxWindow
+	}
 	target.cfg = cfg
 	target.minSNR = cfg.MinSNR
 	target.maxDriftHz = cfg.MaxDriftHz

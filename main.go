@@ -229,7 +229,7 @@ type stationConfig struct {
 func defaultStationConfig() stationConfig {
 	return stationConfig{
 		MinSNR:     10.0,
-		MaxDriftHz: 100.0,
+		MaxDriftHz: 50.0, // spectrum window is ±50 Hz (200 bins × 0.5 Hz/bin)
 		Enabled:    true,
 	}
 }

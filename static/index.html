@@ -47,9 +47,10 @@
     <section id="status-section">
       <h2>Live Status</h2>
       <p class="chart-hint" style="margin-bottom:10px">
-        Doppler shift is measured from a 1 kHz spectrum window (500 bins × 2 Hz/bin) centred on each carrier,
+        Doppler shift is measured from a 100 Hz spectrum window (200 bins × 0.5 Hz/bin) centred on each carrier,
         using a power-weighted centroid over the 3 dB peak region — the same algorithm used by the UberSDR
-        frequency reference monitor. Typical precision is <strong>~0.1–0.2 Hz</strong> at SNR &gt; 20 dB.
+        frequency reference monitor. Typical precision is <strong>~0.01 Hz</strong> at SNR &gt; 20 dB.
+        Spectrum updates every ~2 seconds; minute means average ~30 samples.
       </p>
       <div class="table-wrap">
         <table id="status-table">
@@ -75,7 +76,7 @@
     <!-- Mini spectrum display — one canvas per station showing the 1 kHz window -->
     <section id="spectrum-section">
       <h2>Signal Lock</h2>
-      <p class="chart-hint" style="margin-bottom:12px">1 kHz window (500 bins × 2 Hz/bin) centred on each carrier. <span style="color:var(--green)">Green dashed</span> = nominal frequency. <span style="color:#f85149">Red marker</span> = detected peak (power-weighted centroid, ~0.1 Hz precision at high SNR). Scroll to zoom · drag to pan · double-click to reset.</p>
+      <p class="chart-hint" style="margin-bottom:12px">100 Hz window (200 bins × 0.5 Hz/bin) centred on each carrier. <span style="color:var(--green)">Green dashed</span> = nominal frequency. <span style="color:#f85149">Red marker</span> = detected peak (power-weighted centroid, ~0.01 Hz precision at high SNR). Scroll to zoom · drag to pan · double-click to reset.</p>
       <div id="mini-spectra"></div>
     </section>
 
@@ -205,8 +206,8 @@
                 <span class="field-hint">Reject readings below this SNR</span>
               </label>
               <label>Max Drift (Hz)
-                <input type="number" id="f-max-drift" value="100" step="1" min="1">
-                <span class="field-hint">±Hz search range around carrier</span>
+                <input type="number" id="f-max-drift" value="50" step="1" min="1" max="50">
+                <span class="field-hint">±Hz search range around carrier (max 50 Hz — spectrum window limit)</span>
               </label>
             </div>
             <div class="form-row">
