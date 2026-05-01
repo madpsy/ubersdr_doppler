@@ -11,9 +11,10 @@
 //     for the live audio preview feature (streaming WAV to the browser). Not
 //     used for Doppler measurement.
 //
-// The spectrum connection uses a 500-bin × 2 Hz = 1 kHz window centred on the
-// carrier frequency, giving 2 Hz/bin resolution. With parabolic sub-bin
-// interpolation the effective precision is ~0.01 Hz.
+// The spectrum connection uses 200 bins × 0.5 Hz/bin = 100 Hz window centred
+// on the carrier frequency. Sub-bin frequency estimation uses parabolic
+// interpolation (always applied) blended with a power-weighted centroid for
+// wider signals, giving effective precision of ~0.01 Hz or better.
 package main
 
 import (
@@ -966,7 +967,33 @@ func detectDopplerWithPeak(bins []float32, binBandwidth, minSNR, maxDriftHz floa
 		peakPower = centerPeakPower
 	}
 
-	// Power-weighted centroid over contiguous 3 dB range (same as UberSDR)
+	// Sub-bin frequency estimation: parabolic interpolation on the peak and its
+	// two neighbours. This always gives true sub-bin precision for narrow CW
+	// carriers regardless of how many bins fall within the 3 dB bandwidth.
+	// For wider signals (multiple bins above threshold) we additionally compute
+	// the power-weighted centroid and average the two estimates, which improves
+	// accuracy when the signal spans several bins.
+	var centroidBin float64
+
+	// Step 1: parabolic interpolation (always applied)
+	parabolicBin := float64(peakBin)
+	if peakBin > 0 && peakBin < n-1 {
+		alpha := float64(bins[peakBin-1])
+		beta := float64(bins[peakBin])
+		gamma := float64(bins[peakBin+1])
+		denom := alpha - 2*beta + gamma
+		if math.Abs(denom) > 0.001 {
+			p := 0.5 * (alpha - gamma) / denom
+			if p > 0.5 {
+				p = 0.5
+			} else if p < -0.5 {
+				p = -0.5
+			}
+			parabolicBin = float64(peakBin) + p
+		}
+	}
+
+	// Step 2: power-weighted centroid over contiguous 3 dB range
 	threshold := peakPower - 3.0
 	startBin := peakBin
 	endBin := peakBin
@@ -984,30 +1011,13 @@ func detectDopplerWithPeak(bins []float32, binBandwidth, minSNR, maxDriftHz floa
 		totalWeight += linearPower
 	}
 
-	var centroidBin float64
-	if totalWeight > 0 {
-		centroidBin = weightedSum / totalWeight
+	if totalWeight > 0 && (endBin-startBin) >= 2 {
+		// Signal spans ≥3 bins: blend parabolic and centroid estimates equally.
+		// The centroid is more accurate for wide signals; parabolic for narrow ones.
+		centroidBin = 0.5*parabolicBin + 0.5*(weightedSum/totalWeight)
 	} else {
-		// Fallback: parabolic interpolation (same as UberSDR fallback)
-		if peakBin > 0 && peakBin < n-1 {
-			alpha := float64(bins[peakBin-1])
-			beta := float64(bins[peakBin])
-			gamma := float64(bins[peakBin+1])
-			denom := alpha - 2*beta + gamma
-			if math.Abs(denom) > 0.001 {
-				p := 0.5 * (alpha - gamma) / denom
-				if p > 0.5 {
-					p = 0.5
-				} else if p < -0.5 {
-					p = -0.5
-				}
-				centroidBin = float64(peakBin) + p
-			} else {
-				centroidBin = float64(peakBin)
-			}
-		} else {
-			centroidBin = float64(peakBin)
-		}
+		// Narrow signal (1–2 bins): parabolic interpolation is the best estimator.
+		centroidBin = parabolicBin
 	}
 
 	// Offset from centre bin → Doppler Hz

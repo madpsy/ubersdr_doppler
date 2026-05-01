@@ -1,8 +1,12 @@
 /* audio-analysis.js — Live audio analysis modal for ubersdr_doppler
  *
  * Opens when the user clicks "Listen" on a station row.
- * Streams the WAV preview, decodes PCM in JS, runs a real-time FFT,
- * and draws:
+ * Uses a single <audio> element connected to the Web Audio API so that:
+ *   • The browser plays the audio normally
+ *   • An AnalyserNode provides real-time FFT data for the spectrum display
+ *   • No duplicate HTTP connections are opened
+ *
+ * Draws:
  *   1. FFT spectrum with real-world frequency axis
  *      (dial_freq_hz + bin_hz, so the carrier appears at carrier_freq_hz)
  *   2. 60-second rolling history of signal power (dBFS) and SNR (dB)
@@ -11,113 +15,53 @@
 'use strict';
 
 // ---------------------------------------------------------------------------
-// Cooley-Tukey radix-2 FFT (in-place, power-of-2 size)
-// Returns magnitude spectrum (dBFS) for the first N/2 bins.
-// ---------------------------------------------------------------------------
-function fftMagnitudeDB(samples) {
-  const N = samples.length; // must be power of 2
-  // Copy into complex arrays
-  const re = new Float32Array(N);
-  const im = new Float32Array(N);
-  for (let i = 0; i < N; i++) re[i] = samples[i];
-
-  // Bit-reversal permutation
-  let j = 0;
-  for (let i = 1; i < N; i++) {
-    let bit = N >> 1;
-    for (; j & bit; bit >>= 1) j ^= bit;
-    j ^= bit;
-    if (i < j) {
-      [re[i], re[j]] = [re[j], re[i]];
-      [im[i], im[j]] = [im[j], im[i]];
-    }
-  }
-
-  // FFT butterfly
-  for (let len = 2; len <= N; len <<= 1) {
-    const ang = -2 * Math.PI / len;
-    const wRe = Math.cos(ang);
-    const wIm = Math.sin(ang);
-    for (let i = 0; i < N; i += len) {
-      let curRe = 1, curIm = 0;
-      for (let k = 0; k < len / 2; k++) {
-        const uRe = re[i + k];
-        const uIm = im[i + k];
-        const vRe = re[i + k + len / 2] * curRe - im[i + k + len / 2] * curIm;
-        const vIm = re[i + k + len / 2] * curIm + im[i + k + len / 2] * curRe;
-        re[i + k]           = uRe + vRe;
-        im[i + k]           = uIm + vIm;
-        re[i + k + len / 2] = uRe - vRe;
-        im[i + k + len / 2] = uIm - vIm;
-        const newRe = curRe * wRe - curIm * wIm;
-        curIm = curRe * wIm + curIm * wRe;
-        curRe = newRe;
-      }
-    }
-  }
-
-  // Magnitude in dBFS (normalised to full-scale 16-bit = 32768)
-  const half = N / 2;
-  const mag = new Float32Array(half);
-  const scale = 1 / (N * 32768);
-  for (let i = 0; i < half; i++) {
-    const m = Math.sqrt(re[i] * re[i] + im[i] * im[i]) * scale;
-    mag[i] = m > 1e-10 ? 20 * Math.log10(m) : -120;
-  }
-  return mag;
-}
-
-// Next power of 2 ≥ n
-function nextPow2(n) {
-  let p = 1;
-  while (p < n) p <<= 1;
-  return p;
-}
-
-// ---------------------------------------------------------------------------
-// Hann window coefficients
-// ---------------------------------------------------------------------------
-function hannWindow(N) {
-  const w = new Float32Array(N);
-  for (let i = 0; i < N; i++) w[i] = 0.5 * (1 - Math.cos(2 * Math.PI * i / (N - 1)));
-  return w;
-}
-
-// ---------------------------------------------------------------------------
 // AudioAnalysisModal — self-contained controller
 // ---------------------------------------------------------------------------
 const AudioAnalysisModal = (() => {
   // State
-  let _label = null;
-  let _dialFreqHz = 0;
+  let _label        = null;
+  let _dialFreqHz   = 0;
   let _carrierFreqHz = 0;
-  let _sampleRate = 12000;
-  let _abortController = null;
-  let _animFrame = null;
-  let _open = false;
-  let _audioEl = null; // <audio> element for actual playback
+  let _sampleRate   = 12000;
+  let _open         = false;
 
-  // Ring buffer for PCM samples (Float32, normalised -1..1)
-  const RING_SIZE = 65536; // must be power of 2
-  const ring = new Float32Array(RING_SIZE);
-  let ringHead = 0; // next write position
+  // Audio passband limits (Hz, audio-relative from dial frequency).
+  // Must match the bandwidthLow/bandwidthHigh sent to UberSDR in doppler.go.
+  // The carrier tone appears at 1000 Hz in the audio passband (dial = carrier - 1000).
+  const PASSBAND_LOW  = 300;   // Hz above dial frequency
+  const PASSBAND_HIGH = 1500;  // Hz above dial frequency
 
-  // FFT config
-  const FFT_SIZE = 4096; // bins used for spectrum
-  let hannWin = null;
+  // Web Audio API objects
+  let _audioCtx     = null;
+  let _audioEl      = null;   // <audio> element — single connection for play + FFT
+  let _analyser     = null;   // AnalyserNode
+  let _sourceNode   = null;   // MediaElementSourceNode
 
-  // History: 60 seconds × ~10 updates/sec = 600 points max
+  // rAF render loop handle
+  let _animFrame    = null;
+
+  // FFT config — AnalyserNode handles the FFT; we just read its output.
+  // Web Audio API maximum is 32768 (2^15). At 12 kHz sample rate this gives
+  // 16384 bins × (12000/32768) ≈ 0.37 Hz/bin — maximum possible resolution.
+  const FFT_SIZE    = 32768;  // maximum allowed by Web Audio API spec
+
+  // History: 60 seconds of signal/SNR readings from SSE
   const HISTORY_SECS = 60;
-  const histSignal = []; // {t, v} dBFS
-  const histSNR    = []; // {t, v} dB
+  const histSignal  = [];     // {t, v} dBFS
+  const histSNR     = [];     // {t, v} dB
 
   // Canvas refs
-  let fftCanvas = null;
-  let histCanvas = null;
+  let fftCanvas     = null;
+  let histCanvas    = null;
 
-  // Smoothed FFT magnitude (exponential moving average)
-  let smoothMag = null;
-  const SMOOTH_ALPHA = 0.25; // blend factor for new frame
+  // Smoothed FFT magnitude buffer (dB, from AnalyserNode.getFloatFrequencyData)
+  let smoothMag     = null;
+  const SMOOTH_ALPHA = 0.3;   // blend factor for new frame (higher = more responsive)
+
+  // FFT zoom/pan state (in passband-bin space)
+  // binView: { lo, hi } — the range of passband bins currently visible
+  // null = full passband view (reset on open)
+  let fftView = null; // { lo: number, hi: number }
 
   // ---------------------------------------------------------------------------
   // Public: register a new signal/SNR reading from the SSE feed
@@ -125,13 +69,12 @@ const AudioAnalysisModal = (() => {
   // ---------------------------------------------------------------------------
   function pushReading(reading) {
     if (!_open || !reading.valid) return;
-    const now = Date.now();
+    const now    = Date.now();
     const cutoff = now - HISTORY_SECS * 1000;
     histSignal.push({ t: now, v: reading.signal_dbfs });
-    histSNR.push({ t: now, v: reading.snr_db });
-    // Trim old points
+    histSNR.push(   { t: now, v: reading.snr_db });
     while (histSignal.length > 0 && histSignal[0].t < cutoff) histSignal.shift();
-    while (histSNR.length > 0 && histSNR[0].t < cutoff) histSNR.shift();
+    while (histSNR.length    > 0 && histSNR[0].t    < cutoff) histSNR.shift();
   }
 
   // ---------------------------------------------------------------------------
@@ -140,153 +83,145 @@ const AudioAnalysisModal = (() => {
   async function open(label) {
     if (_open) close();
     _label = label;
-    _open = true;
+    _open  = true;
 
-    // Clear history
+    // Clear history and zoom state
     histSignal.length = 0;
-    histSNR.length = 0;
-    smoothMag = null;
-    ringHead = 0;
-    ring.fill(0);
+    histSNR.length    = 0;
+    smoothMag         = null;
+    fftView           = null; // reset to full passband view
 
     // Show modal
     const modal = document.getElementById('audio-modal');
     modal.classList.remove('hidden');
-    document.getElementById('audio-modal-title').textContent = `🎧 ${label} — Audio Analysis`;
-    document.getElementById('audio-modal-subtitle').textContent = 'Fetching stream info…';
+    document.getElementById('audio-modal-title').textContent     = `🎧 ${label} — Audio Analysis`;
+    document.getElementById('audio-modal-subtitle').textContent  = 'Fetching stream info…';
     setStatus('connecting', '⬤ Connecting…');
-    document.getElementById('audio-fft-info').textContent = '';
-    document.getElementById('fft-carrier-label').textContent = '—';
+    document.getElementById('audio-fft-info').textContent        = '';
+    document.getElementById('fft-carrier-label').textContent     = '—';
 
     fftCanvas  = document.getElementById('audio-fft-canvas');
     histCanvas = document.getElementById('audio-history-canvas');
 
+    // Attach zoom/pan interaction to FFT canvas (idempotent — checks flag)
+    attachFFTInteraction(fftCanvas);
+
     // Fetch audio info (sample rate, dial freq)
     try {
       const BASE = (window.BASE_PATH || '').replace(/\/$/, '');
-      const r = await fetch(`${BASE}/api/audio/info?station=${encodeURIComponent(label)}`);
+      const r    = await fetch(`${BASE}/api/audio/info?station=${encodeURIComponent(label)}`);
       if (!r.ok) throw new Error(await r.text());
-      const info = await r.json();
-      _sampleRate    = info.sample_rate    || 12000;
-      _dialFreqHz    = info.dial_freq_hz   || 0;
+      const info     = await r.json();
+      _sampleRate    = info.sample_rate     || 12000;
+      _dialFreqHz    = info.dial_freq_hz    || 0;
       _carrierFreqHz = info.carrier_freq_hz || 0;
 
       document.getElementById('audio-modal-subtitle').textContent =
         `${fmtHzLocal(_carrierFreqHz)} carrier · ${_sampleRate} Hz sample rate · dial ${fmtHzLocal(_dialFreqHz)} (USB)`;
       document.getElementById('fft-carrier-label').textContent = fmtHzLocal(_carrierFreqHz);
 
-      // FFT bin resolution
       const binHz = _sampleRate / FFT_SIZE;
       document.getElementById('audio-fft-info').textContent =
-        `FFT: ${FFT_SIZE} pts · ${binHz.toFixed(2)} Hz/bin · ${(_sampleRate / 2).toFixed(0)} Hz span`;
-
-      hannWin = hannWindow(FFT_SIZE);
+        `FFT: ${FFT_SIZE} pts · ${binHz.toFixed(3)} Hz/bin · showing ${PASSBAND_LOW}–${PASSBAND_HIGH} Hz passband`;
     } catch (e) {
       setStatus('error', `⬤ Error: ${e.message}`);
       return;
     }
 
+    // Create AudioContext (lazy — must be after a user gesture)
+    try {
+      _audioCtx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: _sampleRate });
+    } catch (e) {
+      // Fall back to default sample rate if the requested one is unsupported
+      _audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    }
+
+    // AnalyserNode — Web Audio API does the FFT for us
+    _analyser                  = _audioCtx.createAnalyser();
+    _analyser.fftSize          = FFT_SIZE;
+    _analyser.smoothingTimeConstant = 0; // we do our own smoothing
+    _analyser.minDecibels      = -140;
+    _analyser.maxDecibels      = 0;
+    _analyser.connect(_audioCtx.destination);
+
+    // Single <audio> element — one HTTP connection for both playback and FFT
+    const BASE    = (window.BASE_PATH || '').replace(/\/$/, '');
+    const audioUrl = `${BASE}/api/audio/preview?station=${encodeURIComponent(label)}`;
+    _audioEl       = new Audio(audioUrl);
+    _audioEl.crossOrigin = 'anonymous'; // required for Web Audio API tap
+    _audioEl.preload     = 'none';
+
+    // Connect audio element → analyser → speakers
+    _sourceNode = _audioCtx.createMediaElementSource(_audioEl);
+    _sourceNode.connect(_analyser);
+
+    _audioEl.oncanplay = () => {
+      setStatus('live', '⬤ Live');
+    };
+    _audioEl.onerror = () => {
+      if (_open) setStatus('error', '⬤ Stream error');
+    };
+    _audioEl.onended = () => {
+      if (_open) close();
+    };
+
+    _audioEl.play().catch(e => {
+      console.warn('audio play() failed:', e);
+      setStatus('error', `⬤ Playback blocked: ${e.message}`);
+    });
+
+    // Resume AudioContext if it was suspended (autoplay policy)
+    if (_audioCtx.state === 'suspended') {
+      _audioCtx.resume().catch(() => {});
+    }
+
     // Start render loop
     _animFrame = requestAnimationFrame(renderLoop);
-
-    // Start audio playback via a separate <audio> element (WAV stream)
-    const BASE = (window.BASE_PATH || '').replace(/\/$/, '');
-    const audioUrl = `${BASE}/api/audio/preview?station=${encodeURIComponent(label)}`;
-    _audioEl = new Audio(audioUrl);
-    _audioEl.play().catch(e => console.warn('audio playback failed:', e));
-    _audioEl.onended = () => { if (_open) close(); };
-    _audioEl.onerror = () => { if (_open) setStatus('error', '⬤ Playback error'); };
-
-    // Start streaming audio for FFT analysis (separate fetch connection)
-    _abortController = new AbortController();
-    streamAudio(_abortController.signal);
   }
 
   // ---------------------------------------------------------------------------
-  // Close the modal — stops both playback and the FFT analysis stream
+  // Close the modal — stops playback and tears down Web Audio graph
   // ---------------------------------------------------------------------------
   function close() {
-    _open = false;
+    _open  = false;
     _label = null;
-    // Stop audio playback
+
+    // Stop audio element
     if (_audioEl) {
-      _audioEl.onended = null;
-      _audioEl.onerror = null;
+      _audioEl.oncanplay = null;
+      _audioEl.onerror   = null;
+      _audioEl.onended   = null;
       _audioEl.pause();
       _audioEl.src = '';
       _audioEl.load(); // abort the HTTP stream
       _audioEl = null;
     }
-    // Abort the FFT fetch stream
-    if (_abortController) { _abortController.abort(); _abortController = null; }
+
+    // Disconnect Web Audio graph
+    if (_sourceNode) {
+      try { _sourceNode.disconnect(); } catch (_) {}
+      _sourceNode = null;
+    }
+    if (_analyser) {
+      try { _analyser.disconnect(); } catch (_) {}
+      _analyser = null;
+    }
+    if (_audioCtx) {
+      _audioCtx.close().catch(() => {});
+      _audioCtx = null;
+    }
+
+    // Cancel render loop
     if (_animFrame) { cancelAnimationFrame(_animFrame); _animFrame = null; }
+
+    // Hide modal
     const modal = document.getElementById('audio-modal');
     if (modal) modal.classList.add('hidden');
+
     // Sync app.js state so the Listen button reverts to its default label
     if (typeof state !== 'undefined') {
       state.audioPlaying = null;
       if (typeof renderStatusTable === 'function') renderStatusTable();
-    }
-  }
-
-  // ---------------------------------------------------------------------------
-  // Stream WAV audio, decode PCM, fill ring buffer
-  // ---------------------------------------------------------------------------
-  async function streamAudio(signal) {
-    const BASE = (window.BASE_PATH || '').replace(/\/$/, '');
-    const url = `${BASE}/api/audio/preview?station=${encodeURIComponent(_label)}`;
-
-    try {
-      const resp = await fetch(url, { signal });
-      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-
-      const reader = resp.body.getReader();
-      let wavHeaderSkipped = false;
-      let headerBuf = new Uint8Array(0);
-
-      setStatus('live', '⬤ Live');
-
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done || signal.aborted) break;
-
-        let chunk = value;
-
-        // Skip the 44-byte WAV header on the first chunk(s)
-        if (!wavHeaderSkipped) {
-          const combined = new Uint8Array(headerBuf.length + chunk.length);
-          combined.set(headerBuf);
-          combined.set(chunk, headerBuf.length);
-          headerBuf = combined;
-          if (headerBuf.length < 44) continue;
-          // Verify RIFF magic
-          const magic = String.fromCharCode(headerBuf[0], headerBuf[1], headerBuf[2], headerBuf[3]);
-          if (magic !== 'RIFF') {
-            // Not a WAV header — treat all bytes as raw PCM
-            wavHeaderSkipped = true;
-            chunk = headerBuf;
-            headerBuf = new Uint8Array(0);
-          } else {
-            wavHeaderSkipped = true;
-            chunk = headerBuf.slice(44);
-            headerBuf = new Uint8Array(0);
-          }
-        }
-
-        // Decode 16-bit little-endian PCM samples
-        if (chunk.length < 2) continue;
-        const nSamples = Math.floor(chunk.length / 2);
-        const view = new DataView(chunk.buffer, chunk.byteOffset, chunk.byteLength);
-        for (let i = 0; i < nSamples; i++) {
-          const s16 = view.getInt16(i * 2, true); // little-endian
-          ring[ringHead & (RING_SIZE - 1)] = s16; // store raw int16 (FFT normalises)
-          ringHead++;
-        }
-      }
-    } catch (e) {
-      if (!signal.aborted) {
-        setStatus('error', `⬤ Stream error: ${e.message}`);
-      }
     }
   }
 
@@ -301,15 +236,91 @@ const AudioAnalysisModal = (() => {
   }
 
   // ---------------------------------------------------------------------------
+  // FFT canvas zoom/pan interaction
+  // Wheel: zoom towards cursor. Drag: pan. Double-click: reset.
+  // Prevents scroll events from reaching the page behind the modal.
+  // ---------------------------------------------------------------------------
+  function attachFFTInteraction(canvas) {
+    if (canvas._fftInteractionAttached) return;
+    canvas._fftInteractionAttached = true;
+
+    // Helper: get current full passband bin range (depends on _sampleRate which
+    // may not be set yet when this is called, so compute lazily inside handlers)
+    function getFullRange() {
+      const binHz  = (_sampleRate || 12000) / FFT_SIZE;
+      const half   = FFT_SIZE / 2;
+      return {
+        lo: Math.max(1, Math.floor(PASSBAND_LOW  / binHz)),
+        hi: Math.min(half - 1, Math.ceil(PASSBAND_HIGH / binHz)),
+      };
+    }
+
+    function getView() {
+      if (!fftView) fftView = getFullRange();
+      return fftView;
+    }
+
+    // Mouse wheel → zoom towards cursor position
+    canvas.addEventListener('wheel', e => {
+      e.preventDefault(); // stop page scroll
+      e.stopPropagation();
+      const full   = getFullRange();
+      const view   = getView();
+      const ML     = 46;
+      const plotW  = canvas.clientWidth - ML;
+      const rect   = canvas.getBoundingClientRect();
+      const frac   = Math.max(0, Math.min(1, (e.clientX - rect.left - ML) / plotW));
+      const span   = view.hi - view.lo;
+      const curBin = view.lo + frac * span;
+      const factor = e.deltaY < 0 ? 0.6 : 1.667; // zoom in / out
+      const newSpan = Math.max(5, Math.min(full.hi - full.lo, span * factor));
+      let newLo = curBin - frac * newSpan;
+      let newHi = newLo + newSpan;
+      // Clamp to full range
+      if (newLo < full.lo) { newLo = full.lo; newHi = newLo + newSpan; }
+      if (newHi > full.hi) { newHi = full.hi; newLo = newHi - newSpan; }
+      fftView = { lo: newLo, hi: newHi };
+    }, { passive: false });
+
+    // Click-drag → pan
+    let dragStart = null;
+    let dragViewLo = null;
+    canvas.addEventListener('mousedown', e => {
+      dragStart  = e.clientX;
+      dragViewLo = getView().lo;
+    });
+    canvas.addEventListener('mousemove', e => {
+      if (dragStart === null) return;
+      const view  = getView();
+      const ML    = 46;
+      const plotW = canvas.clientWidth - ML;
+      const span  = view.hi - view.lo;
+      const binsPerPx = span / plotW;
+      const dx    = e.clientX - dragStart;
+      const full  = getFullRange();
+      let newLo   = dragViewLo - dx * binsPerPx;
+      newLo = Math.max(full.lo, Math.min(full.hi - span, newLo));
+      fftView = { lo: newLo, hi: newLo + span };
+    });
+    const endDrag = () => { dragStart = null; dragViewLo = null; };
+    canvas.addEventListener('mouseup', endDrag);
+    canvas.addEventListener('mouseleave', endDrag);
+
+    // Double-click → reset to full passband
+    canvas.addEventListener('dblclick', () => { fftView = null; });
+  }
+
+  // ---------------------------------------------------------------------------
   // Draw FFT spectrum canvas
   // ---------------------------------------------------------------------------
   function drawFFT() {
-    if (!fftCanvas || !hannWin) return;
-    const dpr = window.devicePixelRatio || 1;
-    const cssW = fftCanvas.clientWidth || 760;
+    if (!fftCanvas || !_analyser) return;
+
+    const dpr  = window.devicePixelRatio || 1;
+    const cssW = fftCanvas.clientWidth  || 760;
     const cssH = fftCanvas.clientHeight || 160;
-    const W = Math.round(cssW * dpr);
-    const H = Math.round(cssH * dpr);
+    const W    = Math.round(cssW * dpr);
+    const H    = Math.round(cssH * dpr);
     if (fftCanvas.width !== W || fftCanvas.height !== H) {
       fftCanvas.width = W; fftCanvas.height = H;
     }
@@ -324,9 +335,17 @@ const AudioAnalysisModal = (() => {
     ctx.fillStyle = '#0d1117';
     ctx.fillRect(0, 0, CW, CH);
 
-    // Extract FFT_SIZE samples from ring buffer (most recent)
-    const available = Math.min(ringHead, RING_SIZE);
-    if (available < FFT_SIZE) {
+    // Read FFT data from AnalyserNode (float dB values)
+    const half = _analyser.frequencyBinCount; // = FFT_SIZE / 2
+    const freqData = new Float32Array(half);
+    _analyser.getFloatFrequencyData(freqData);
+
+    // Check if we have real data yet (all -Infinity means no audio yet)
+    let hasData = false;
+    for (let i = 1; i < half; i++) {
+      if (isFinite(freqData[i]) && freqData[i] > -140) { hasData = true; break; }
+    }
+    if (!hasData) {
       ctx.fillStyle = '#8b949e';
       ctx.font = '11px sans-serif';
       ctx.textAlign = 'center';
@@ -334,43 +353,53 @@ const AudioAnalysisModal = (() => {
       return;
     }
 
-    const samples = new Float32Array(FFT_SIZE);
-    const startIdx = ringHead - FFT_SIZE;
-    for (let i = 0; i < FFT_SIZE; i++) {
-      samples[i] = ring[(startIdx + i) & (RING_SIZE - 1)] * hannWin[i];
-    }
-
-    const mag = fftMagnitudeDB(samples);
-    const half = mag.length; // FFT_SIZE / 2
-
     // Smooth
     if (!smoothMag || smoothMag.length !== half) {
-      smoothMag = new Float32Array(mag);
+      smoothMag = new Float32Array(freqData);
     } else {
       for (let i = 0; i < half; i++) {
-        smoothMag[i] = smoothMag[i] * (1 - SMOOTH_ALPHA) + mag[i] * SMOOTH_ALPHA;
+        if (isFinite(freqData[i])) {
+          smoothMag[i] = smoothMag[i] * (1 - SMOOTH_ALPHA) + freqData[i] * SMOOTH_ALPHA;
+        }
       }
     }
 
-    // dB range
+    // Determine visible bin range: use zoom view if set, else full passband.
+    // AnalyserNode bin i → audio freq = i * sampleRate / FFT_SIZE
+    // Real-world freq = dialFreqHz + audio_freq
+    const binHz      = _sampleRate / FFT_SIZE;
+    const pbLo       = Math.max(1, Math.floor(PASSBAND_LOW  / binHz));
+    const pbHi       = Math.min(half - 1, Math.ceil(PASSBAND_HIGH / binHz));
+    const binLow     = fftView ? Math.max(pbLo, Math.round(fftView.lo)) : pbLo;
+    const binHigh    = fftView ? Math.min(pbHi, Math.round(fftView.hi)) : pbHi;
+    const freqStart  = _dialFreqHz + binLow  * binHz;  // real-world Hz at left edge
+    const freqEnd    = _dialFreqHz + binHigh * binHz;  // real-world Hz at right edge
+    const freqSpan   = freqEnd - freqStart || 1;
+    const numBins    = binHigh - binLow + 1;
+
+    // Helper: bin index → X pixel within [ML, ML+plotW]
+    const binToX = i => ML + ((i - binLow) / (numBins - 1)) * plotW;
+
+    // dB range over passband bins only
     let minDB = Infinity, maxDB = -Infinity;
-    for (let i = 1; i < half; i++) { // skip DC bin
+    for (let i = binLow; i <= binHigh; i++) {
+      if (!isFinite(smoothMag[i])) continue;
       if (smoothMag[i] < minDB) minDB = smoothMag[i];
       if (smoothMag[i] > maxDB) maxDB = smoothMag[i];
     }
     if (!isFinite(minDB)) { minDB = -120; maxDB = -40; }
     const dbFloor = Math.floor(minDB / 10) * 10;
-    const dbCeil  = Math.ceil(maxDB / 10) * 10;
+    const dbCeil  = Math.ceil(maxDB  / 10) * 10;
     const dbRange = dbCeil - dbFloor || 10;
-    const dbToY = db => plotH - ((db - dbFloor) / dbRange) * plotH;
+    const dbToY   = db => plotH - ((db - dbFloor) / dbRange) * plotH;
 
-    // Draw spectrum bars
+    // Draw spectrum bars (passband only)
     ctx.fillStyle = '#58a6ff88';
-    const barW = plotW / (half - 1);
-    for (let i = 1; i < half; i++) {
-      const x = ML + (i - 1) / (half - 1) * plotW;
-      const y = dbToY(smoothMag[i]);
-      ctx.fillRect(x, y, Math.max(1, barW), plotH - y);
+    const barW = Math.max(1, plotW / numBins);
+    for (let i = binLow; i <= binHigh; i++) {
+      const x = binToX(i);
+      const y = dbToY(isFinite(smoothMag[i]) ? smoothMag[i] : dbFloor);
+      ctx.fillRect(x, y, barW, plotH - y);
     }
 
     // Y axis
@@ -389,18 +418,11 @@ const AudioAnalysisModal = (() => {
       ctx.setLineDash([]);
     }
 
-    // X axis — real-world frequency
-    // bin i → freq = dialFreqHz + i * (sampleRate / FFT_SIZE)
-    const binHz = _sampleRate / FFT_SIZE;
-    const freqStart = _dialFreqHz;                        // bin 0 (DC)
-    const freqEnd   = _dialFreqHz + (half - 1) * binHz;  // bin half-1
-    const freqSpan  = freqEnd - freqStart;
-
-    // Nice label step
-    const rawStep = freqSpan / 6;
-    const mag10 = Math.pow(10, Math.floor(Math.log10(Math.abs(rawStep) || 1)));
-    const niceSteps = [1, 2, 5, 10, 20, 50, 100, 200, 500, 1000, 2000, 5000, 10000];
-    let freqStep = (niceSteps.find(v => v * mag10 >= rawStep) || 1000) * mag10;
+    // X axis — real-world frequency labels across the passband
+    const rawStep   = freqSpan / 6;
+    const mag10     = Math.pow(10, Math.floor(Math.log10(Math.abs(rawStep) || 1)));
+    const niceSteps = [1, 2, 5, 10, 20, 50, 100, 200, 500, 1000, 2000, 5000];
+    let freqStep    = (niceSteps.find(v => v * mag10 >= rawStep) || 100) * mag10;
     if (freqStep < 1) freqStep = 1;
 
     ctx.font = '9px sans-serif';
@@ -429,7 +451,6 @@ const AudioAnalysisModal = (() => {
       ctx.setLineDash([4, 3]);
       ctx.beginPath(); ctx.moveTo(cx, 0); ctx.lineTo(cx, plotH); ctx.stroke();
       ctx.setLineDash([]);
-      // Label
       ctx.fillStyle = '#3fb950';
       ctx.font = '9px sans-serif';
       ctx.textAlign = cx > CW - 60 ? 'right' : 'left';
@@ -444,15 +465,18 @@ const AudioAnalysisModal = (() => {
   }
 
   // ---------------------------------------------------------------------------
-  // Draw 60-second history canvas (signal dBFS + SNR dB)
+  // Draw 60-second history canvas
+  // Dual-axis layout: signal (dBFS) on left axis, SNR (dB) on right axis.
+  // Both series share the full plot height for maximum readability.
   // ---------------------------------------------------------------------------
   function drawHistory() {
     if (!histCanvas) return;
-    const dpr = window.devicePixelRatio || 1;
-    const cssW = histCanvas.clientWidth || 760;
+
+    const dpr  = window.devicePixelRatio || 1;
+    const cssW = histCanvas.clientWidth  || 760;
     const cssH = histCanvas.clientHeight || 130;
-    const W = Math.round(cssW * dpr);
-    const H = Math.round(cssH * dpr);
+    const W    = Math.round(cssW * dpr);
+    const H    = Math.round(cssH * dpr);
     if (histCanvas.width !== W || histCanvas.height !== H) {
       histCanvas.width = W; histCanvas.height = H;
     }
@@ -460,73 +484,97 @@ const AudioAnalysisModal = (() => {
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     const CW = cssW, CH = cssH;
 
-    const ML = 46, MB = 18;
-    const plotW = CW - ML, plotH = CH - MB;
+    // Left margin for signal axis, right margin for SNR axis, bottom for time
+    const ML = 46, MR = 46, MB = 18;
+    const plotW = CW - ML - MR;
+    const plotH = CH - MB;
 
     ctx.clearRect(0, 0, CW, CH);
     ctx.fillStyle = '#0d1117';
     ctx.fillRect(0, 0, CW, CH);
 
-    const now = Date.now();
+    const now    = Date.now();
     const tStart = now - HISTORY_SECS * 1000;
-    const tToX = t => ML + ((t - tStart) / (HISTORY_SECS * 1000)) * plotW;
+    const tToX   = t => ML + ((t - tStart) / (HISTORY_SECS * 1000)) * plotW;
 
     if (histSignal.length < 2) {
       ctx.fillStyle = '#8b949e';
       ctx.font = '11px sans-serif';
       ctx.textAlign = 'center';
       ctx.fillText('Waiting for signal data…', ML + plotW / 2, CH / 2);
+      drawTimeAxis(ctx, ML, plotW, plotH, CH);
+      ctx.strokeStyle = '#30363d';
+      ctx.lineWidth = 1;
+      ctx.setLineDash([]);
+      ctx.strokeRect(ML, 0, plotW, plotH);
       return;
     }
 
-    // Compute ranges
+    // Compute ranges — enforce a minimum 10 dB span so the line is never flat
+    const MIN_SPAN = 10;
     let sigMin = Infinity, sigMax = -Infinity;
     let snrMin = Infinity, snrMax = -Infinity;
     for (const p of histSignal) { if (p.v < sigMin) sigMin = p.v; if (p.v > sigMax) sigMax = p.v; }
     for (const p of histSNR)    { if (p.v < snrMin) snrMin = p.v; if (p.v > snrMax) snrMax = p.v; }
     if (!isFinite(sigMin)) { sigMin = -120; sigMax = -40; }
-    if (!isFinite(snrMin)) { snrMin = 0; snrMax = 40; }
-
-    // Split canvas vertically: top 60% = signal, bottom 40% = SNR
-    const splitY = Math.round(plotH * 0.58);
-    const sigH = splitY - 2;
-    const snrH = plotH - splitY - 2;
+    if (!isFinite(snrMin)) { snrMin = 0;    snrMax = 40; }
+    if (sigMax - sigMin < MIN_SPAN) { const m = (sigMin + sigMax) / 2; sigMin = m - MIN_SPAN / 2; sigMax = m + MIN_SPAN / 2; }
+    if (snrMax - snrMin < MIN_SPAN) { const m = (snrMin + snrMax) / 2; snrMin = Math.max(0, m - MIN_SPAN / 2); snrMax = snrMin + MIN_SPAN; }
 
     const sigFloor = Math.floor(sigMin / 5) * 5;
-    const sigCeil  = Math.ceil(sigMax / 5) * 5;
-    const sigRange = sigCeil - sigFloor || 10;
-    const sigToY = v => sigH - ((v - sigFloor) / sigRange) * sigH;
+    const sigCeil  = Math.ceil(sigMax  / 5) * 5;
+    const sigRange = sigCeil - sigFloor || MIN_SPAN;
+    const sigToY   = v => plotH - ((v - sigFloor) / sigRange) * plotH;
 
     const snrFloor = Math.max(0, Math.floor(snrMin / 5) * 5);
     const snrCeil  = Math.ceil(snrMax / 5) * 5;
-    const snrRange = snrCeil - snrFloor || 10;
-    const snrToY = v => splitY + 4 + snrH - ((v - snrFloor) / snrRange) * snrH;
+    const snrRange = snrCeil - snrFloor || MIN_SPAN;
+    const snrToY   = v => plotH - ((v - snrFloor) / snrRange) * plotH;
 
-    // ── Signal power (dBFS) ──────────────────────────────────────────────
-    // Y axis
+    // ── Left Y axis: signal power (dBFS) — blue ──────────────────────────────
     ctx.font = '9px sans-serif';
-    ctx.textAlign = 'right';
     const sigStep = sigRange <= 20 ? 5 : 10;
     for (let v = sigFloor; v <= sigCeil; v += sigStep) {
       const y = sigToY(v);
-      if (y < 0 || y > sigH) continue;
-      ctx.fillStyle = '#8b949e';
+      if (y < 0 || y > plotH) continue;
+      ctx.fillStyle = '#58a6ff';
+      ctx.textAlign = 'right';
       ctx.fillText(v, ML - 3, y + 3);
-      ctx.strokeStyle = '#21262d';
+      ctx.strokeStyle = '#1a2332';
       ctx.lineWidth = 1;
-      ctx.setLineDash([2, 2]);
-      ctx.beginPath(); ctx.moveTo(ML, y); ctx.lineTo(CW, y); ctx.stroke();
+      ctx.setLineDash([2, 3]);
+      ctx.beginPath(); ctx.moveTo(ML, y); ctx.lineTo(ML + plotW, y); ctx.stroke();
       ctx.setLineDash([]);
     }
-    // Label
+    // Left axis label
     ctx.save();
     ctx.fillStyle = '#58a6ff';
     ctx.font = '8px sans-serif';
-    ctx.textAlign = 'left';
-    ctx.fillText('dBFS', ML + 2, 9);
+    ctx.textAlign = 'right';
+    ctx.fillText('dBFS', ML - 3, 9);
     ctx.restore();
 
-    // Line
+    // ── Right Y axis: SNR (dB) — green ───────────────────────────────────────
+    const snrStep = snrRange <= 20 ? 5 : 10;
+    for (let v = snrFloor; v <= snrCeil; v += snrStep) {
+      const y = snrToY(v);
+      if (y < 0 || y > plotH) continue;
+      ctx.fillStyle = '#3fb950';
+      ctx.font = '9px sans-serif';
+      ctx.textAlign = 'left';
+      ctx.fillText(v, ML + plotW + 3, y + 3);
+      // Only draw grid lines for SNR ticks that don't already have a signal tick nearby
+      // (avoid double grid lines cluttering the plot)
+    }
+    // Right axis label
+    ctx.save();
+    ctx.fillStyle = '#3fb950';
+    ctx.font = '8px sans-serif';
+    ctx.textAlign = 'left';
+    ctx.fillText('SNR dB', ML + plotW + 3, 9);
+    ctx.restore();
+
+    // ── Signal power line (blue) ──────────────────────────────────────────────
     ctx.strokeStyle = '#58a6ff';
     ctx.lineWidth = 1.5;
     ctx.beginPath();
@@ -534,44 +582,12 @@ const AudioAnalysisModal = (() => {
     for (const p of histSignal) {
       const x = tToX(p.t);
       const y = sigToY(p.v);
-      if (x < ML || x > CW) continue;
+      if (x < ML || x > ML + plotW) continue;
       if (first) { ctx.moveTo(x, y); first = false; } else ctx.lineTo(x, y);
     }
     ctx.stroke();
 
-    // Divider
-    ctx.strokeStyle = '#30363d';
-    ctx.lineWidth = 1;
-    ctx.setLineDash([]);
-    ctx.beginPath();
-    ctx.moveTo(ML, splitY);
-    ctx.lineTo(CW, splitY);
-    ctx.stroke();
-
-    // ── SNR (dB) ─────────────────────────────────────────────────────────
-    const snrStep = snrRange <= 20 ? 5 : 10;
-    for (let v = snrFloor; v <= snrCeil; v += snrStep) {
-      const y = snrToY(v);
-      if (y < splitY + 4 || y > plotH) continue;
-      ctx.fillStyle = '#8b949e';
-      ctx.font = '9px sans-serif';
-      ctx.textAlign = 'right';
-      ctx.fillText(v, ML - 3, y + 3);
-      ctx.strokeStyle = '#21262d';
-      ctx.lineWidth = 1;
-      ctx.setLineDash([2, 2]);
-      ctx.beginPath(); ctx.moveTo(ML, y); ctx.lineTo(CW, y); ctx.stroke();
-      ctx.setLineDash([]);
-    }
-    // Label
-    ctx.save();
-    ctx.fillStyle = '#3fb950';
-    ctx.font = '8px sans-serif';
-    ctx.textAlign = 'left';
-    ctx.fillText('SNR dB', ML + 2, splitY + 12);
-    ctx.restore();
-
-    // Line
+    // ── SNR line (green) ──────────────────────────────────────────────────────
     ctx.strokeStyle = '#3fb950';
     ctx.lineWidth = 1.5;
     ctx.beginPath();
@@ -579,16 +595,26 @@ const AudioAnalysisModal = (() => {
     for (const p of histSNR) {
       const x = tToX(p.t);
       const y = snrToY(p.v);
-      if (x < ML || x > CW) continue;
+      if (x < ML || x > ML + plotW) continue;
       if (first) { ctx.moveTo(x, y); first = false; } else ctx.lineTo(x, y);
     }
     ctx.stroke();
 
-    // ── X axis (time, seconds ago) ────────────────────────────────────────
+    // Time axis
+    drawTimeAxis(ctx, ML, plotW, plotH, CH);
+
+    // Axis border
+    ctx.strokeStyle = '#30363d';
+    ctx.lineWidth = 1;
+    ctx.setLineDash([]);
+    ctx.strokeRect(ML, 0, plotW, plotH);
+  }
+
+  function drawTimeAxis(ctx, ML, plotW, plotH, CH) {
     ctx.font = '9px sans-serif';
     ctx.textAlign = 'center';
     for (let s = 0; s <= HISTORY_SECS; s += 10) {
-      const x = ML + (s / HISTORY_SECS) * plotW;
+      const x     = ML + (s / HISTORY_SECS) * plotW;
       const label = s === 0 ? '−60s' : s === HISTORY_SECS ? 'now' : `−${HISTORY_SECS - s}s`;
       ctx.fillStyle = '#8b949e';
       ctx.fillText(label, x, CH - 3);
@@ -598,12 +624,6 @@ const AudioAnalysisModal = (() => {
       ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, plotH); ctx.stroke();
       ctx.setLineDash([]);
     }
-
-    // Axis border
-    ctx.strokeStyle = '#30363d';
-    ctx.lineWidth = 1;
-    ctx.setLineDash([]);
-    ctx.strokeRect(ML, 0, plotW, plotH);
   }
 
   // ---------------------------------------------------------------------------
@@ -612,7 +632,7 @@ const AudioAnalysisModal = (() => {
   function setStatus(type, text) {
     const el = document.getElementById('audio-status-text');
     if (!el) return;
-    el.className = 'audio-status-' + type;
+    el.className  = 'audio-status-' + type;
     el.textContent = text;
   }
 
