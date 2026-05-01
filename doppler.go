@@ -26,6 +26,7 @@ import (
 	"math"
 	"net/http"
 	"net/url"
+	"os"
 	"sort"
 	"strings"
 	"sync"
@@ -257,9 +258,10 @@ const (
 type DopplerStation struct {
 	cfg stationConfig
 
-	ubersdrURL string
-	minSNR     float64
-	maxDriftHz float64
+	ubersdrURL  string
+	historyPath string // path to the per-station history JSON file (empty = no persistence)
+	minSNR      float64
+	maxDriftHz  float64
 
 	hub       *sseHub
 	csvWriter *csvWriter
@@ -298,16 +300,78 @@ type DopplerStation struct {
 }
 
 // newDopplerStation creates a DopplerStation from a stationConfig.
-func newDopplerStation(cfg stationConfig, ubersdrURL string, hub *sseHub, cw *csvWriter) *DopplerStation {
-	return &DopplerStation{
-		cfg:        cfg,
-		ubersdrURL: ubersdrURL,
-		minSNR:     cfg.MinSNR,
-		maxDriftHz: cfg.MaxDriftHz,
-		hub:        hub,
-		csvWriter:  cw,
-		audioHub:   newAudioBroadcastHub(),
+// dataDir is the data directory for history persistence; pass "" to disable.
+func newDopplerStation(cfg stationConfig, ubersdrURL, dataDir string, hub *sseHub, cw *csvWriter) *DopplerStation {
+	histPath := ""
+	if dataDir != "" {
+		// Sanitise label for use as a filename component
+		safe := strings.Map(func(r rune) rune {
+			if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '-' || r == '_' {
+				return r
+			}
+			return '_'
+		}, cfg.Label)
+		histPath = dataDir + "/history-" + safe + ".json"
 	}
+	return &DopplerStation{
+		cfg:         cfg,
+		ubersdrURL:  ubersdrURL,
+		historyPath: histPath,
+		minSNR:      cfg.MinSNR,
+		maxDriftHz:  cfg.MaxDriftHz,
+		hub:         hub,
+		csvWriter:   cw,
+		audioHub:    newAudioBroadcastHub(),
+	}
+}
+
+// saveHistory writes the current history slice to disk atomically.
+// Must be called with ds.mu held (read or write).
+func (ds *DopplerStation) saveHistory() {
+	if ds.historyPath == "" {
+		return
+	}
+	data, err := json.Marshal(ds.history)
+	if err != nil {
+		log.Printf("[%s] history: marshal error: %v", ds.cfg.Label, err)
+		return
+	}
+	tmp := ds.historyPath + ".tmp"
+	if err := os.WriteFile(tmp, data, 0o644); err != nil {
+		log.Printf("[%s] history: write error: %v", ds.cfg.Label, err)
+		return
+	}
+	if err := os.Rename(tmp, ds.historyPath); err != nil {
+		log.Printf("[%s] history: rename error: %v", ds.cfg.Label, err)
+	}
+}
+
+// loadHistoryFromDisk reads the history file and populates ds.history.
+// Safe to call before the station goroutine starts.
+func (ds *DopplerStation) loadHistoryFromDisk() {
+	if ds.historyPath == "" {
+		return
+	}
+	data, err := os.ReadFile(ds.historyPath)
+	if err != nil {
+		if !os.IsNotExist(err) {
+			log.Printf("[%s] history: read error: %v", ds.cfg.Label, err)
+		}
+		return
+	}
+	var h []MinuteMean
+	if err := json.Unmarshal(data, &h); err != nil {
+		log.Printf("[%s] history: parse error: %v", ds.cfg.Label, err)
+		return
+	}
+	// Trim to historyDepth in case the file is older/larger
+	if len(h) > historyDepth {
+		h = h[len(h)-historyDepth:]
+	}
+	ds.mu.Lock()
+	ds.history = h
+	ds.mu.Unlock()
+	log.Printf("[%s] history: loaded %d minute-means from disk", ds.cfg.Label, len(h))
 }
 
 // httpBaseURL converts any UberSDR URL (ws/wss/http/https) to an HTTP base URL.
@@ -1011,6 +1075,7 @@ func (ds *DopplerStation) aggregateMinute() {
 	if len(ds.history) > historyDepth {
 		ds.history = ds.history[len(ds.history)-historyDepth:]
 	}
+	ds.saveHistory() // persist to disk while lock is held
 	ds.mu.Unlock()
 
 	ds.csvWriter.write(ds.cfg, mean, mean.CorrectedDopplerHz)
@@ -1095,7 +1160,8 @@ func (m *stationManager) load() {
 		if cfg.ID == "" {
 			cfg.ID = uuid.New().String()
 		}
-		ds := newDopplerStation(cfg, m.ubersdrURL, m.hub, m.csvWriter)
+		ds := newDopplerStation(cfg, m.ubersdrURL, m.dataDir, m.hub, m.csvWriter)
+		ds.loadHistoryFromDisk()
 		m.stations = append(m.stations, ds)
 	}
 	m.mu.Unlock()
@@ -1201,7 +1267,7 @@ func (m *stationManager) add(cfg stationConfig) (*DopplerStation, error) {
 			return nil, fmt.Errorf("station %q already exists", cfg.Label)
 		}
 	}
-	ds := newDopplerStation(cfg, m.ubersdrURL, m.hub, m.csvWriter)
+	ds := newDopplerStation(cfg, m.ubersdrURL, m.dataDir, m.hub, m.csvWriter)
 	if !cfg.IsReference {
 		ds.refProvider = m.referenceCorrection
 	}

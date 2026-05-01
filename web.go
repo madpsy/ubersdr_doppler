@@ -410,9 +410,31 @@ func startHTTPServer(
 			http.Error(w, "station parameter required", http.StatusBadRequest)
 			return
 		}
+		// Optional date filter: ?date=YYYY-MM-DD (UTC day)
+		dateStr := r.URL.Query().Get("date")
+		var filterDate time.Time
+		if dateStr != "" {
+			var err error
+			filterDate, err = time.ParseInLocation("2006-01-02", dateStr, time.UTC)
+			if err != nil {
+				http.Error(w, "invalid date format (expected YYYY-MM-DD)", http.StatusBadRequest)
+				return
+			}
+		}
 		for _, ds := range mgr.list() {
 			if ds.cfg.Label == label {
-				jsonResponse(w, ds.History())
+				history := ds.History()
+				if !filterDate.IsZero() {
+					dayEnd := filterDate.Add(24 * time.Hour)
+					filtered := history[:0]
+					for _, m := range history {
+						if !m.Timestamp.Before(filterDate) && m.Timestamp.Before(dayEnd) {
+							filtered = append(filtered, m)
+						}
+					}
+					history = filtered
+				}
+				jsonResponse(w, history)
 				return
 			}
 		}

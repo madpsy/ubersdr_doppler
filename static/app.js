@@ -17,6 +17,7 @@ const BASE = (window.BASE_PATH || '').replace(/\/$/, '');
 // ---------------------------------------------------------------------------
 const state = {
   stations: [],          // [{config, current, baseline_mean_hz, corrected_doppler_hz}]
+  chartDate: '',         // YYYY-MM-DD UTC date filter for history chart ('' = live rolling window)
   dopplerChart: null,
   snrChart: null,
   powerChart: null,
@@ -840,7 +841,9 @@ function updateDopplerChartAxis() {
 }
 
 async function loadHistory() {
-  const cutoff = Date.now() - state.historyHours * 3600 * 1000;
+  // When a specific date is selected, fetch that UTC day; otherwise use rolling window.
+  const usingDate = state.chartDate !== '';
+  const cutoff = usingDate ? 0 : Date.now() - state.historyHours * 3600 * 1000;
   state.dopplerChart.data.datasets = [];
   state.snrChart.data.datasets = [];
   state.powerChart.data.datasets = [];
@@ -854,9 +857,14 @@ async function loadHistory() {
     const nominalHz = s.config.freq_hz;
     const colour = colourForIndex(i);
     try {
-      const r = await apiFetch(`/api/history?station=${encodeURIComponent(label)}`);
+      const url = usingDate
+        ? `/api/history?station=${encodeURIComponent(label)}&date=${encodeURIComponent(state.chartDate)}`
+        : `/api/history?station=${encodeURIComponent(label)}`;
+      const r = await apiFetch(url);
       const history = await r.json() || [];
-      const filtered = history.filter(m => new Date(m.timestamp).getTime() >= cutoff);
+      const filtered = usingDate
+        ? history  // server already filtered to the day
+        : history.filter(m => new Date(m.timestamp).getTime() >= cutoff);
 
       // Use corrected Doppler when available (reference station offset applied)
       const dopplerPoints = filtered.map(m => {
@@ -1057,6 +1065,7 @@ function connectSSE() {
             }
           });
           drawMiniSpectra();
+          updateSpectrumHints();
         } catch (e) {
           console.warn('spectrum refresh failed', e);
         }
@@ -1146,6 +1155,20 @@ function populateDownloadSelect() {
   ).join('');
 }
 
+function updateSpectrumHints() {
+  // Use the first station with actual spectrum data to get real bin count and bandwidth
+  const s = state.stations.find(x => x.spectrum_data && x.spectrum_data.length > 0 && x.bin_bandwidth > 0);
+  if (!s) return;
+  const bins = s.spectrum_data.length;
+  const bw   = s.bin_bandwidth;
+  const windowHz = (bins * bw).toFixed(0);
+  const text = `${windowHz} Hz window (${bins} bins × ${bw} Hz/bin)`;
+  const el1 = document.getElementById('hint-window-spec');
+  const el2 = document.getElementById('hint-window-spec2');
+  if (el1) el1.textContent = text;
+  if (el2) el2.textContent = text;
+}
+
 async function loadStations() {
   const r = await apiFetch('/api/stations');
   state.stations = await r.json() || [];
@@ -1153,6 +1176,7 @@ async function loadStations() {
   renderStationList();
   populateDownloadSelect();
   drawMiniSpectra();
+  updateSpectrumHints();
 }
 
 // Modal helpers
@@ -1316,8 +1340,33 @@ document.addEventListener('DOMContentLoaded', async () => {
   // ── Hours selector ───────────────────────────────────────────────────────
   document.getElementById('hours-select').addEventListener('change', async e => {
     state.historyHours = parseInt(e.target.value, 10);
+    // Clear date filter when rolling window is changed
+    state.chartDate = '';
+    const dateEl = document.getElementById('chart-date');
+    if (dateEl) dateEl.value = '';
+    const clearBtn = document.getElementById('chart-date-clear');
+    if (clearBtn) clearBtn.style.display = 'none';
     await loadHistory();
   });
+
+  // ── Date picker for historical chart view ────────────────────────────────
+  const chartDateEl = document.getElementById('chart-date');
+  const chartDateClearEl = document.getElementById('chart-date-clear');
+  if (chartDateEl) {
+    chartDateEl.addEventListener('change', async e => {
+      state.chartDate = e.target.value; // YYYY-MM-DD or ''
+      if (chartDateClearEl) chartDateClearEl.style.display = state.chartDate ? '' : 'none';
+      await loadHistory();
+    });
+  }
+  if (chartDateClearEl) {
+    chartDateClearEl.addEventListener('click', async () => {
+      state.chartDate = '';
+      if (chartDateEl) chartDateEl.value = '';
+      chartDateClearEl.style.display = 'none';
+      await loadHistory();
+    });
+  }
 
   // ── Chart mode (doppler / absolute frequency) ────────────────────────────
   const chartModeEl = document.getElementById('chart-mode');

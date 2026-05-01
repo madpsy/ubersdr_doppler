@@ -47,7 +47,8 @@
     <section id="status-section">
       <h2>Live Status</h2>
       <p class="chart-hint" style="margin-bottom:10px">
-        Doppler shift is measured from a 100 Hz spectrum window (200 bins × 0.5 Hz/bin) centred on each carrier,
+        Doppler shift is measured from a spectrum window centred on each carrier
+        (<span id="hint-window-spec">…</span>),
         using a power-weighted centroid over the 3 dB peak region — the same algorithm used by the UberSDR
         frequency reference monitor. Typical precision is <strong>~0.01 Hz</strong> at SNR &gt; 20 dB.
         Spectrum updates every ~2 seconds; minute means average ~30 samples.
@@ -76,7 +77,7 @@
     <!-- Mini spectrum display — one canvas per station showing the 1 kHz window -->
     <section id="spectrum-section">
       <h2>Signal Lock</h2>
-      <p class="chart-hint" style="margin-bottom:12px">100 Hz window (200 bins × 0.5 Hz/bin) centred on each carrier. <span style="color:var(--green)">Green dashed</span> = nominal frequency. <span style="color:#f85149">Red marker</span> = detected peak (power-weighted centroid, ~0.01 Hz precision at high SNR). Scroll to zoom · drag to pan · double-click to reset.</p>
+      <p class="chart-hint" style="margin-bottom:12px"><span id="hint-window-spec2">…</span> centred on each carrier. <span style="color:var(--green)">Green dashed</span> = nominal frequency. <span style="color:#f85149">Red marker</span> = detected peak (power-weighted centroid, ~0.01 Hz precision at high SNR). Scroll to zoom · drag to pan · double-click to reset.</p>
       <div id="mini-spectra"></div>
     </section>
 
@@ -93,6 +94,10 @@
               <option value="12">12h</option>
               <option value="24" selected>24h</option>
             </select>
+          </label>
+          <label>Date (UTC):
+            <input type="date" id="chart-date" title="Show a specific UTC day (clears rolling window)">
+            <button id="chart-date-clear" class="btn btn-secondary btn-sm" title="Return to live rolling window" style="display:none">✕ Live</button>
           </label>
           <label>Y-axis:
             <select id="chart-mode">
