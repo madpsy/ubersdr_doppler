@@ -579,6 +579,10 @@ func (ds *DopplerStation) runSpectrumLoop(ctx context.Context) {
 	var lastSpecBroadcast time.Time
 	const specBroadcastInterval = 100 * time.Millisecond
 
+	// Frame rate diagnostics — log actual WS frame rate every 10 seconds.
+	var frameCount int
+	var frameRateStart time.Time
+
 	// WebSocket reconnect loop
 	connCh := make(chan struct{}, 1)
 	connCh <- struct{}{} // trigger first connect
@@ -716,8 +720,19 @@ func (ds *DopplerStation) runSpectrumLoop(ctx context.Context) {
 				bwNow := actualBinBW
 				specMu.Unlock()
 
-				// Broadcast spectrum to SSE clients at up to 10 Hz.
+				// Frame rate diagnostics — log actual WS frame rate every 10 seconds.
 				now := time.Now()
+				frameCount++
+				if frameRateStart.IsZero() {
+					frameRateStart = now
+				} else if elapsed := now.Sub(frameRateStart); elapsed >= 10*time.Second {
+					fps := float64(frameCount) / elapsed.Seconds()
+					log.Printf("[%s] spectrum: %.1f frames/s from UberSDR (binBW=%.2f Hz)", ds.cfg.Label, fps, bwNow)
+					frameCount = 0
+					frameRateStart = now
+				}
+
+				// Broadcast spectrum to SSE clients at up to 10 Hz.
 				if now.Sub(lastSpecBroadcast) >= specBroadcastInterval {
 					lastSpecBroadcast = now
 					// Use the current peak bin from the last measurement (best effort).
