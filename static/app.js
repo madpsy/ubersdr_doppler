@@ -913,21 +913,10 @@ const sunLinePlugin = {
     const yScale = chart.scales.y;
     if (!xScale || !yScale) return;
 
-    // Derive the intended X-axis window from state so the sun lines always
-    // span the full requested period even when data is sparse or absent.
-    let xMin, xMax;
-    if (state.chartDate) {
-      // Specific UTC day selected
-      const dayStart = new Date(state.chartDate + 'T00:00:00Z');
-      xMin = dayStart.getTime();
-      xMax = xMin + 24 * 3600 * 1000;
-    } else {
-      xMax = Date.now();
-      xMin = xMax - state.historyHours * 3600 * 1000;
-    }
-    // If the chart is zoomed, honour the zoomed range instead
-    if (state.zoomedXMin != null) xMin = state.zoomedXMin;
-    if (state.zoomedXMax != null) xMax = state.zoomedXMax;
+    // Use the same window range as the chart axes
+    const win = chartWindowRange();
+    const xMin = state.zoomedXMin ?? win.min;
+    const xMax = state.zoomedXMax ?? win.max;
 
     const sunTimes = getMidpointSunTimes(xMin, xMax);
     if (!sunTimes.length) return;
@@ -1179,13 +1168,24 @@ function initCharts() {
 // The SNR and power charts get the same X limits applied automatically.
 // ---------------------------------------------------------------------------
 
+/** Compute the intended full X-axis window (ms timestamps) from state. */
+function chartWindowRange() {
+  if (state.chartDate) {
+    const start = new Date(state.chartDate + 'T00:00:00Z').getTime();
+    return { min: start, max: start + 24 * 3600 * 1000 };
+  }
+  const max = Date.now();
+  return { min: max - state.historyHours * 3600 * 1000, max };
+}
+
 /** Apply state.zoomedXMin/Max to all three chart X axes and redraw. */
 function applyChartZoom() {
+  const win = chartWindowRange();
   const charts = [state.dopplerChart, state.snrChart, state.powerChart];
   charts.forEach(c => {
     if (!c) return;
-    c.options.scales.x.min = state.zoomedXMin ?? undefined;
-    c.options.scales.x.max = state.zoomedXMax ?? undefined;
+    c.options.scales.x.min = state.zoomedXMin ?? win.min;
+    c.options.scales.x.max = state.zoomedXMax ?? win.max;
     c.update('none');
   });
   // Show/hide the reset-zoom hint
@@ -1503,9 +1503,10 @@ async function loadHistory() {
 
   updateDopplerChartAxis();
   applyBandVisibility();
-  state.dopplerChart.update('none');
-  state.snrChart.update('none');
-  state.powerChart.update('none');
+  // Apply window range (and any active zoom) to all three chart X axes.
+  // This ensures the chart always spans the full requested period even when
+  // data is sparse, and also makes sun lines visible across the whole window.
+  applyChartZoom();
 }
 
 function appendLivePoint(label, reading) {
