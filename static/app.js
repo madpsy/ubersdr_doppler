@@ -1155,13 +1155,15 @@ async function loadHistory() {
         ? history  // server already filtered to the day
         : history.filter(m => new Date(m.timestamp).getTime() >= cutoff);
 
-      // Use corrected Doppler when available (reference station offset applied)
+      // Use corrected Doppler when available (reference station offset applied).
+      // Emit null y for invalid readings so Chart.js breaks the line (spanGaps: false)
+      // instead of interpolating across a no-signal gap.
       const dopplerPoints = filtered.map(m => {
         const hz = (m.corrected_doppler_hz !== null && m.corrected_doppler_hz !== undefined)
           ? m.corrected_doppler_hz : m.doppler_hz;
         return {
           x: new Date(m.timestamp),
-          y: dopplerToY(hz, nominalHz),
+          y: m.valid ? dopplerToY(hz, nominalHz) : null,
           // Attach scientific stats for tooltip
           min: m.min_doppler_hz,
           max: m.max_doppler_hz,
@@ -1169,18 +1171,19 @@ async function loadHistory() {
           count: m.count,
         };
       });
-      // Min/max band: lower boundary dataset (filled up to the mean line)
+      // Min/max band: lower boundary dataset (filled up to the mean line).
+      // Also null-out band points when the reading was invalid.
       const dopplerMinPoints = filtered.map(m => ({
         x: new Date(m.timestamp),
-        y: m.min_doppler_hz !== undefined ? dopplerToY(m.min_doppler_hz, nominalHz) : null,
+        y: (m.valid && m.min_doppler_hz !== undefined) ? dopplerToY(m.min_doppler_hz, nominalHz) : null,
       }));
       const dopplerMaxPoints = filtered.map(m => ({
         x: new Date(m.timestamp),
-        y: m.max_doppler_hz !== undefined ? dopplerToY(m.max_doppler_hz, nominalHz) : null,
+        y: (m.valid && m.max_doppler_hz !== undefined) ? dopplerToY(m.max_doppler_hz, nominalHz) : null,
       }));
 
-      const snrPoints   = filtered.map(m => ({ x: new Date(m.timestamp), y: m.snr_db }));
-      const powerPoints = filtered.map(m => ({ x: new Date(m.timestamp), y: m.signal_dbfs }));
+      const snrPoints   = filtered.map(m => ({ x: new Date(m.timestamp), y: m.valid ? m.snr_db      : null }));
+      const powerPoints = filtered.map(m => ({ x: new Date(m.timestamp), y: m.valid ? m.signal_dbfs : null }));
 
       // Push min band (lower boundary), then max band (upper boundary, fills down to min)
       const dMinIdx = state.dopplerChart.data.datasets.length;
