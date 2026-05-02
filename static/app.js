@@ -33,6 +33,8 @@ const state = {
   showRef: false,    // show reference station on history charts (off by default)
   chartMode: 'doppler',  // 'doppler' | 'absolute'
   specIntervalS: 2,      // spectrum push interval in seconds (1–5)
+  zoomedXMin: null,      // zoomed X-axis min (ms timestamp) or null = full range
+  zoomedXMax: null,      // zoomed X-axis max (ms timestamp) or null = full range
   auth: {
     passwordConfigured: false,
     authenticated: false,
@@ -762,8 +764,24 @@ function initCharts() {
           ticks: { color: '#8b949e' },
           grid: { color: '#21262d' },
           afterDataLimits(scale) {
+            // Recompute limits from mean-line datasets only — ignore _isBand min/max
+            // fill datasets so the axis isn't pulled wide by jitter extremes.
+            let dataMin = Infinity, dataMax = -Infinity;
+            for (const ds of scale.chart.data.datasets) {
+              if (ds._isBand || ds.hidden) continue;
+              for (const pt of ds.data) {
+                if (pt == null || pt.y == null) continue;
+                if (pt.y < dataMin) dataMin = pt.y;
+                if (pt.y > dataMax) dataMax = pt.y;
+              }
+            }
+            if (isFinite(dataMin)) {
+              scale.min = dataMin;
+              scale.max = dataMax;
+            }
+            // Enforce ±0.5 Hz minimum span in doppler mode
             if (state.chartMode === 'doppler') {
-              if (scale.max < 0.5) scale.max = 0.5;
+              if (scale.max < 0.5)  scale.max = 0.5;
               if (scale.min > -0.5) scale.min = -0.5;
             }
           },
@@ -900,6 +918,149 @@ function initCharts() {
       },
     },
   });
+}
+
+// ---------------------------------------------------------------------------
+// Chart zoom / pan — no external plugin required
+//
+// All three panels share the same X axis.  Zoom state is stored in
+// state.zoomedXMin / state.zoomedXMax (ms timestamps, or null = full range).
+//
+// Interactions on the doppler chart canvas:
+//   • Scroll wheel  — zoom in/out around the cursor position
+//   • Click + drag  — draw a selection box; release to zoom to that range
+//   • Double-click  — reset to full range
+//
+// The SNR and power charts get the same X limits applied automatically.
+// ---------------------------------------------------------------------------
+
+/** Apply state.zoomedXMin/Max to all three chart X axes and redraw. */
+function applyChartZoom() {
+  const charts = [state.dopplerChart, state.snrChart, state.powerChart];
+  charts.forEach(c => {
+    if (!c) return;
+    c.options.scales.x.min = state.zoomedXMin ?? undefined;
+    c.options.scales.x.max = state.zoomedXMax ?? undefined;
+    c.update('none');
+  });
+  // Show/hide the reset-zoom hint
+  const hint = document.getElementById('chart-zoom-hint');
+  if (hint) hint.style.display = (state.zoomedXMin !== null) ? '' : 'none';
+}
+
+/** Reset zoom to full range. */
+function resetChartZoom() {
+  state.zoomedXMin = null;
+  state.zoomedXMax = null;
+  applyChartZoom();
+}
+
+/**
+ * Wire scroll-wheel zoom, drag-box zoom, and double-click reset onto a
+ * Chart.js canvas.  All three charts are kept in sync via applyChartZoom().
+ */
+function attachChartZoomHandlers(canvas, chart) {
+  // ── Scroll-wheel zoom ────────────────────────────────────────────────────
+  canvas.addEventListener('wheel', e => {
+    e.preventDefault();
+    const xScale = chart.scales.x;
+    if (!xScale) return;
+
+    // Current visible range (fall back to full data range)
+    const curMin = state.zoomedXMin ?? xScale.min;
+    const curMax = state.zoomedXMax ?? xScale.max;
+    const range  = curMax - curMin;
+    if (range <= 0) return;
+
+    // Cursor position as a fraction of the plot width
+    const rect = canvas.getBoundingClientRect();
+    const frac = Math.max(0, Math.min(1,
+      (e.clientX - rect.left - xScale.left) / (xScale.right - xScale.left)));
+
+    const factor = e.deltaY < 0 ? 0.7 : 1.4;   // scroll up = zoom in
+    const newRange = range * factor;
+
+    // Keep the point under the cursor stationary
+    let newMin = curMin + frac * (range - newRange);
+    let newMax = newMin + newRange;
+
+    // Clamp to the full data extent
+    const dataMin = xScale.min;
+    const dataMax = xScale.max;
+    if (newMin < dataMin) { newMin = dataMin; newMax = dataMin + newRange; }
+    if (newMax > dataMax) { newMax = dataMax; newMin = dataMax - newRange; }
+
+    // If we've zoomed back out to (or beyond) the full range, just reset
+    if (newRange >= (dataMax - dataMin) * 0.999) {
+      resetChartZoom();
+      return;
+    }
+
+    state.zoomedXMin = newMin;
+    state.zoomedXMax = newMax;
+    applyChartZoom();
+  }, { passive: false });
+
+  // ── Drag-box (click + drag) zoom ─────────────────────────────────────────
+  let dragStart = null;   // { x: clientX, dataX: ms }
+  let selBox    = null;   // the overlay <div>
+
+  canvas.addEventListener('mousedown', e => {
+    if (e.button !== 0) return;
+    const xScale = chart.scales.x;
+    if (!xScale) return;
+    const rect = canvas.getBoundingClientRect();
+    const px   = e.clientX - rect.left;
+    // Only start drag inside the plot area
+    if (px < xScale.left || px > xScale.right) return;
+
+    dragStart = { clientX: e.clientX, dataX: xScale.getValueForPixel(px) };
+
+    // Create selection overlay box (position:fixed so it tracks viewport coords)
+    selBox = document.createElement('div');
+    selBox.id = 'chart-sel-box';
+    selBox.style.top    = (rect.top + xScale.top) + 'px';
+    selBox.style.left   = e.clientX + 'px';
+    selBox.style.width  = '0';
+    selBox.style.height = (xScale.bottom - xScale.top) + 'px';
+    document.body.appendChild(selBox);
+  });
+
+  window.addEventListener('mousemove', e => {
+    if (!dragStart || !selBox) return;
+    const xScale = chart.scales.x;
+    if (!xScale) return;
+    const rect  = canvas.getBoundingClientRect();
+    const left  = Math.min(dragStart.clientX, e.clientX);
+    const width = Math.abs(e.clientX - dragStart.clientX);
+    selBox.style.left  = left + 'px';
+    selBox.style.width = width + 'px';
+  });
+
+  window.addEventListener('mouseup', e => {
+    if (!dragStart) return;
+    const xScale = chart.scales.x;
+    if (selBox) { selBox.remove(); selBox = null; }
+
+    if (xScale) {
+      const rect = canvas.getBoundingClientRect();
+      const endPx  = e.clientX - rect.left;
+      const endDataX = xScale.getValueForPixel(endPx);
+      const minX = Math.min(dragStart.dataX, endDataX);
+      const maxX = Math.max(dragStart.dataX, endDataX);
+
+      // Only zoom if the drag was at least 5 px wide
+      if (Math.abs(e.clientX - dragStart.clientX) >= 5) {
+        state.zoomedXMin = minX;
+        state.zoomedXMax = maxX;
+        applyChartZoom();
+      }
+    }
+    dragStart = null;
+  });
+
+  // ── Double-click reset ───────────────────────────────────────────────────
+  canvas.addEventListener('dblclick', () => resetChartZoom());
 }
 
 // Convert doppler_hz to chart Y value based on current mode
@@ -1490,6 +1651,31 @@ async function applySpecInterval(intervalS) {
 
 document.addEventListener('DOMContentLoaded', async () => {
   initCharts();
+
+  // Attach zoom/pan handlers to all three chart canvases.
+  // Scroll-wheel and drag-box zoom are wired to the doppler chart;
+  // double-click reset is wired to all three.
+  [
+    { id: 'doppler-chart', chart: () => state.dopplerChart, full: true },
+    { id: 'snr-chart',     chart: () => state.snrChart,     full: false },
+    { id: 'power-chart',   chart: () => state.powerChart,   full: false },
+  ].forEach(({ id, chart, full }) => {
+    const canvas = document.getElementById(id);
+    if (!canvas) return;
+    if (full) {
+      attachChartZoomHandlers(canvas, chart());
+    } else {
+      // SNR / power: double-click reset only (scroll zoom on doppler chart drives all)
+      canvas.addEventListener('dblclick', () => resetChartZoom());
+      canvas.addEventListener('wheel', e => {
+        e.preventDefault();
+        // Delegate to the doppler chart's wheel handler by re-dispatching there
+        const dopplerCanvas = document.getElementById('doppler-chart');
+        if (dopplerCanvas) dopplerCanvas.dispatchEvent(new WheelEvent('wheel', e));
+      }, { passive: false });
+    }
+  });
+
   startSpecRenderLoop();
   startStalenessTicker();
   startHistoryRefreshTicker();
@@ -1498,6 +1684,12 @@ document.addEventListener('DOMContentLoaded', async () => {
   await loadStations();
   await loadHistory();
   connectSSE();
+
+  // ── Zoom reset link ──────────────────────────────────────────────────────
+  const zoomResetEl = document.getElementById('chart-zoom-reset');
+  if (zoomResetEl) {
+    zoomResetEl.addEventListener('click', e => { e.preventDefault(); resetChartZoom(); });
+  }
 
   // Restore saved spectrum interval preference
   const savedInterval = parseInt(localStorage.getItem('specIntervalS') || '2', 10);

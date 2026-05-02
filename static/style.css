@@ -318,3 +318,18 @@ tr.row-stale td  { background: rgba(210,153,34,0.08); }
   border-radius: 4px;
   cursor: crosshair;
 }
+
+/* ── Chart zoom / pan ──────────────────────────────────────────────────── */
+/* Crosshair cursor on all history chart canvases */
+#doppler-chart, #snr-chart, #power-chart {
+  cursor: crosshair;
+}
+/* Drag-selection box drawn over the chart while the user is selecting a range */
+#chart-sel-box {
+  position: fixed;
+  pointer-events: none;
+  z-index: 200;
+  background: rgba(88, 166, 255, 0.12);
+  border: 1px solid rgba(88, 166, 255, 0.55);
+  box-sizing: border-box;
+}
