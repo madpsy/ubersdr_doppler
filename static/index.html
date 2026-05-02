@@ -144,8 +144,8 @@
       <div class="chart-header">
         <h2>Doppler Shift History</h2>
         <div class="chart-controls">
-          <label>View:
-            <select id="hours-select">
+          <label>
+            <select id="hours-select" title="View window">
               <option value="1">1h</option>
               <option value="3">3h</option>
               <option value="6">6h</option>
@@ -153,14 +153,22 @@
               <option value="24" selected>24h</option>
             </select>
           </label>
-          <label>Date (UTC):
+          <label>
             <input type="date" id="chart-date" title="Show a specific UTC day (clears rolling window)">
             <button id="chart-date-clear" class="btn btn-secondary btn-sm" title="Return to live rolling window" style="display:none">✕ Live</button>
           </label>
-          <label>Y-axis:
-            <select id="chart-mode">
+          <label>
+            <select id="chart-mode" title="Y-axis mode">
               <option value="doppler">Doppler shift (Hz)</option>
               <option value="absolute">Absolute frequency (Hz)</option>
+            </select>
+          </label>
+          <label>
+            <select id="smoothing-select" title="Smoothing window">
+              <option value="1" selected>1 min</option>
+              <option value="2">2 min</option>
+              <option value="5">5 min</option>
+              <option value="10">10 min</option>
             </select>
           </label>
           <label class="checkbox-label">

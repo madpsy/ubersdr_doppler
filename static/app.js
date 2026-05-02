@@ -35,6 +35,7 @@ const state = {
   specIntervalS: 2,      // spectrum push interval in seconds (1–5)
   zoomedXMin: null,      // zoomed X-axis min (ms timestamp) or null = full range
   zoomedXMax: null,      // zoomed X-axis max (ms timestamp) or null = full range
+  smoothingMinutes: 1,   // rolling-average window applied to history points (1 = no smoothing)
   auth: {
     passwordConfigured: false,
     authenticated: false,
@@ -1131,9 +1132,11 @@ async function loadHistory() {
     const nominalHz = s.config.freq_hz;
     const colour = colourForIndex(i);
     try {
+      // Backend applies smoothing; pass smooth=N (1 = no smoothing, default)
+      const smoothParam = state.smoothingMinutes > 1 ? `&smooth=${state.smoothingMinutes}` : '';
       const url = usingDate
-        ? `/api/history?station=${encodeURIComponent(label)}&date=${encodeURIComponent(state.chartDate)}`
-        : `/api/history?station=${encodeURIComponent(label)}`;
+        ? `/api/history?station=${encodeURIComponent(label)}&date=${encodeURIComponent(state.chartDate)}${smoothParam}`
+        : `/api/history?station=${encodeURIComponent(label)}${smoothParam}`;
       const r = await apiFetch(url);
       const history = await r.json() || [];
       const filtered = usingDate
@@ -1164,8 +1167,8 @@ async function loadHistory() {
         y: m.max_doppler_hz !== undefined ? dopplerToY(m.max_doppler_hz, nominalHz) : null,
       }));
 
-      const snrPoints     = filtered.map(m => ({ x: new Date(m.timestamp), y: m.snr_db }));
-      const powerPoints   = filtered.map(m => ({ x: new Date(m.timestamp), y: m.signal_dbfs }));
+      const snrPoints   = filtered.map(m => ({ x: new Date(m.timestamp), y: m.snr_db }));
+      const powerPoints = filtered.map(m => ({ x: new Date(m.timestamp), y: m.signal_dbfs }));
 
       // Push min band (lower boundary), then max band (upper boundary, fills down to min)
       const dMinIdx = state.dopplerChart.data.datasets.length;
@@ -1862,6 +1865,15 @@ document.addEventListener('DOMContentLoaded', async () => {
   if (chartModeEl) {
     chartModeEl.addEventListener('change', async e => {
       state.chartMode = e.target.value;
+      await loadHistory();
+    });
+  }
+
+  // ── Smoothing selector ───────────────────────────────────────────────────
+  const smoothingEl = document.getElementById('smoothing-select');
+  if (smoothingEl) {
+    smoothingEl.addEventListener('change', async e => {
+      state.smoothingMinutes = parseInt(e.target.value, 10);
       await loadHistory();
     });
   }

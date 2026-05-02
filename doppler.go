@@ -1192,6 +1192,73 @@ func (ds *DopplerStation) History() []MinuteMean {
 	return out
 }
 
+// smoothMinuteMeans applies a centred rolling average of width w over a
+// []MinuteMean slice and returns the smoothed result.  w=1 is a no-op.
+// The timestamp of each output point is taken from the corresponding input
+// point so the time axis is unchanged.  All numeric fields are averaged;
+// min/max are taken as the true min/max over the window so the band still
+// reflects the actual spread.  CorrectedDopplerHz is averaged only when all
+// points in the window have a non-nil value; otherwise it is set to nil.
+func smoothMinuteMeans(in []MinuteMean, w int) []MinuteMean {
+	if w <= 1 || len(in) == 0 {
+		return in
+	}
+	out := make([]MinuteMean, len(in))
+	half := w / 2
+	for i := range in {
+		start := i - half
+		if start < 0 {
+			start = 0
+		}
+		end := start + w - 1
+		if end >= len(in) {
+			end = len(in) - 1
+		}
+		window := in[start : end+1]
+		n := float64(len(window))
+
+		var sumDoppler, sumSNR, sumSig, sumNoise float64
+		var sumCorr float64
+		corrCount := 0
+		minHz := window[0].MinDopplerHz
+		maxHz := window[0].MaxDopplerHz
+		for _, m := range window {
+			sumDoppler += m.DopplerHz
+			sumSNR += float64(m.SNR)
+			sumSig += float64(m.SignalDBFS)
+			sumNoise += float64(m.NoiseDBFS)
+			if m.MinDopplerHz < minHz {
+				minHz = m.MinDopplerHz
+			}
+			if m.MaxDopplerHz > maxHz {
+				maxHz = m.MaxDopplerHz
+			}
+			if m.CorrectedDopplerHz != nil {
+				sumCorr += *m.CorrectedDopplerHz
+				corrCount++
+			}
+		}
+
+		sm := MinuteMean{
+			Timestamp:    in[i].Timestamp,
+			DopplerHz:    sumDoppler / n,
+			MinDopplerHz: minHz,
+			MaxDopplerHz: maxHz,
+			StdDevHz:     in[i].StdDevHz, // keep per-minute jitter unchanged
+			SNR:          float32(sumSNR / n),
+			SignalDBFS:   float32(sumSig / n),
+			NoiseDBFS:    float32(sumNoise / n),
+			Count:        in[i].Count,
+		}
+		if corrCount == len(window) {
+			c := sumCorr / n
+			sm.CorrectedDopplerHz = &c
+		}
+		out[i] = sm
+	}
+	return out
+}
+
 // BaselineMean returns the mean Doppler shift over the last n minute-means.
 // It prefers CorrectedDopplerHz (reference-corrected) when available, falling
 // back to raw DopplerHz. This ensures the value is consistent with what is

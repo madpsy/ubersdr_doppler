@@ -547,6 +547,16 @@ func startHTTPServer(
 			http.Error(w, "station parameter required", http.StatusBadRequest)
 			return
 		}
+		// Optional smoothing window: ?smooth=N (integer minutes, 1–10; 1 = no smoothing)
+		smoothN := 1
+		if s := r.URL.Query().Get("smooth"); s != "" {
+			var n int
+			if _, err := fmt.Sscanf(s, "%d", &n); err != nil || n < 1 || n > 10 {
+				http.Error(w, "smooth must be an integer between 1 and 10", http.StatusBadRequest)
+				return
+			}
+			smoothN = n
+		}
 		// Optional date filter: ?date=YYYY-MM-DD (UTC day)
 		// When present, read directly from the per-date history file on disk.
 		// When absent, return the in-memory rolling 24h window.
@@ -566,9 +576,9 @@ func startHTTPServer(
 				if history == nil {
 					history = []MinuteMean{} // return empty array, not null
 				}
-				jsonResponse(w, history)
+				jsonResponse(w, smoothMinuteMeans(history, smoothN))
 			} else {
-				jsonResponse(w, ds.History())
+				jsonResponse(w, smoothMinuteMeans(ds.History(), smoothN))
 			}
 			return
 		}
