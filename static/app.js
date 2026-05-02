@@ -1155,15 +1155,13 @@ async function loadHistory() {
         ? history  // server already filtered to the day
         : history.filter(m => new Date(m.timestamp).getTime() >= cutoff);
 
-      // Use corrected Doppler when available (reference station offset applied).
-      // Emit null y for invalid readings so Chart.js breaks the line (spanGaps: false)
-      // instead of interpolating across a no-signal gap.
+      // Use corrected Doppler when available (reference station offset applied)
       const dopplerPoints = filtered.map(m => {
         const hz = (m.corrected_doppler_hz !== null && m.corrected_doppler_hz !== undefined)
           ? m.corrected_doppler_hz : m.doppler_hz;
         return {
           x: new Date(m.timestamp),
-          y: m.valid ? dopplerToY(hz, nominalHz) : null,
+          y: dopplerToY(hz, nominalHz),
           // Attach scientific stats for tooltip
           min: m.min_doppler_hz,
           max: m.max_doppler_hz,
@@ -1171,19 +1169,18 @@ async function loadHistory() {
           count: m.count,
         };
       });
-      // Min/max band: lower boundary dataset (filled up to the mean line).
-      // Also null-out band points when the reading was invalid.
+      // Min/max band: lower boundary dataset (filled up to the mean line)
       const dopplerMinPoints = filtered.map(m => ({
         x: new Date(m.timestamp),
-        y: (m.valid && m.min_doppler_hz !== undefined) ? dopplerToY(m.min_doppler_hz, nominalHz) : null,
+        y: m.min_doppler_hz !== undefined ? dopplerToY(m.min_doppler_hz, nominalHz) : null,
       }));
       const dopplerMaxPoints = filtered.map(m => ({
         x: new Date(m.timestamp),
-        y: (m.valid && m.max_doppler_hz !== undefined) ? dopplerToY(m.max_doppler_hz, nominalHz) : null,
+        y: m.max_doppler_hz !== undefined ? dopplerToY(m.max_doppler_hz, nominalHz) : null,
       }));
 
-      const snrPoints   = filtered.map(m => ({ x: new Date(m.timestamp), y: m.valid ? m.snr_db      : null }));
-      const powerPoints = filtered.map(m => ({ x: new Date(m.timestamp), y: m.valid ? m.signal_dbfs : null }));
+      const snrPoints   = filtered.map(m => ({ x: new Date(m.timestamp), y: m.snr_db }));
+      const powerPoints = filtered.map(m => ({ x: new Date(m.timestamp), y: m.signal_dbfs }));
 
       // Push min band (lower boundary), then max band (upper boundary, fills down to min)
       const dMinIdx = state.dopplerChart.data.datasets.length;
@@ -1292,13 +1289,29 @@ function appendLivePoint(label, reading) {
   // Use corrected Doppler when available (reference station offset applied)
   const dHz = (reading.corrected_doppler_hz !== null && reading.corrected_doppler_hz !== undefined)
     ? reading.corrected_doppler_hz : reading.doppler_hz;
-  const yVal = reading.valid ? dopplerToY(dHz, nominalHz) : null;
-  // Live 1-second readings don't have min/max/std — those are minute-mean stats
-  dDs.data.push({ x: ts, y: yVal });
-  if (dMinDs) dMinDs.data.push({ x: ts, y: yVal }); // live: band collapses to mean line
-  if (dMaxDs) dMaxDs.data.push({ x: ts, y: yVal });
-  sDs.data.push({ x: ts, y: reading.valid ? reading.snr_db : null });
-  pDs.data.push({ x: ts, y: reading.valid ? reading.signal_dbfs : null });
+
+  if (!reading.valid) {
+    // Only push a single null sentinel when the signal first drops — this marks
+    // the gap start for the gapAnnotationPlugin without causing Chart.js bezier
+    // curves to slope toward a long run of null x-positions.
+    const lastDPt = dDs.data.length > 0 ? dDs.data[dDs.data.length - 1] : null;
+    const alreadyNull = lastDPt && lastDPt.y === null;
+    if (!alreadyNull) {
+      dDs.data.push({ x: ts, y: null });
+      if (dMinDs) dMinDs.data.push({ x: ts, y: null });
+      if (dMaxDs) dMaxDs.data.push({ x: ts, y: null });
+      sDs.data.push({ x: ts, y: null });
+      pDs.data.push({ x: ts, y: null });
+    }
+  } else {
+    const yVal = dopplerToY(dHz, nominalHz);
+    // Live 1-second readings don't have min/max/std — those are minute-mean stats
+    dDs.data.push({ x: ts, y: yVal });
+    if (dMinDs) dMinDs.data.push({ x: ts, y: yVal }); // live: band collapses to mean line
+    if (dMaxDs) dMaxDs.data.push({ x: ts, y: yVal });
+    sDs.data.push({ x: ts, y: reading.snr_db });
+    pDs.data.push({ x: ts, y: reading.signal_dbfs });
+  }
 
   const trimDs = ds => {
     while (ds.data.length > 0 && ds.data[0].x.getTime() < cutoff) ds.data.shift();
@@ -1644,10 +1657,11 @@ const gapAnnotationPlugin = {
           gapStart = null;
         }
       }
-      // Handle a gap that runs to the end of the data
+      // Handle a gap that runs to the end of the data.
+      // Use Date.now() as gapEnd so the band extends to the right edge of the
+      // visible chart area rather than stopping at the last data point's timestamp.
       if (gapStart !== null) {
-        const lastPt = data[data.length - 1];
-        const gapEnd = lastPt.x instanceof Date ? lastPt.x.getTime() : new Date(lastPt.x).getTime();
+        const gapEnd = Date.now();
         if (gapEnd - gapStart >= GAP_MIN_MS) {
           const x1 = xScale.getPixelForValue(gapStart);
           const x2 = xScale.getPixelForValue(gapEnd);
