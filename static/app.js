@@ -45,6 +45,7 @@ const state = {
   // Per-station wall-clock time of the last SSE message received from the backend.
   // Used to detect backend→UberSDR connection staleness independently of reading.valid.
   lastServerTime: {},    // label → Date
+  receiverGrid: null,    // Maidenhead locator from /api/description (receiver position)
 };
 
 // Staleness threshold: if no SSE message has arrived for a station in this many
@@ -77,6 +78,66 @@ window.toggleAudioPreview = function(label) {
 };
 
 // ---------------------------------------------------------------------------
+// Geo helpers — Maidenhead ↔ lat/lon and haversine distance
+// ---------------------------------------------------------------------------
+
+/** Convert a 4- or 6-character Maidenhead locator to {lat, lon} (centre of square). */
+function maidenheadToLatLon(grid) {
+  if (!grid || grid.length < 4) return null;
+  const g = grid.toUpperCase();
+  const lon = (g.charCodeAt(0) - 65) * 20
+            + (parseInt(g[2], 10)) * 2
+            + (g.length >= 6 ? (g.charCodeAt(4) - 65 + 0.5) / 12 : 1)
+            - 180;
+  const lat = (g.charCodeAt(1) - 65) * 10
+            + parseInt(g[3], 10)
+            + (g.length >= 6 ? (g.charCodeAt(5) - 65 + 0.5) / 24 : 0.5)
+            - 90;
+  return { lat, lon };
+}
+
+/** Haversine great-circle distance in km between two {lat,lon} points. */
+function haversineKm(a, b) {
+  const R = 6371;
+  const dLat = (b.lat - a.lat) * Math.PI / 180;
+  const dLon = (b.lon - a.lon) * Math.PI / 180;
+  const s = Math.sin(dLat / 2) ** 2
+          + Math.cos(a.lat * Math.PI / 180) * Math.cos(b.lat * Math.PI / 180)
+          * Math.sin(dLon / 2) ** 2;
+  return R * 2 * Math.atan2(Math.sqrt(s), Math.sqrt(1 - s));
+}
+
+/**
+ * After the receiver grid is known, update any already-rendered spectrum
+ * panel grid badges to include the distance.
+ */
+function updateSpecGridBadges() {
+  state.stations.forEach(s => {
+    if (!s.config.grid) return;
+    const canvasId = `spec-canvas-${s.config.label.replace(/[^a-zA-Z0-9]/g, '_')}`;
+    const badgeEl = document.getElementById(`spec-grid-${canvasId}`);
+    if (!badgeEl) return;
+    badgeEl.textContent = specGridText(s.config.grid);
+  });
+}
+
+/** Build the text content for a station's grid badge. */
+function specGridText(stationGrid) {
+  let text = '📍 ' + stationGrid;
+  if (state.receiverGrid && stationGrid) {
+    const rxPos = maidenheadToLatLon(state.receiverGrid);
+    const txPos = maidenheadToLatLon(stationGrid);
+    if (rxPos && txPos) {
+      const km = haversineKm(rxPos, txPos);
+      text += '  ' + (km >= 1000
+        ? (km / 1000).toFixed(1) + 'k km'
+        : Math.round(km) + ' km');
+    }
+  }
+  return text;
+}
+
+// ---------------------------------------------------------------------------
 // SDR description — fetched from the base domain (origin root) on load.
 // Extracts receiver.gps.maidenhead and receiver.callsign and shows them in
 // the header's #sdr-info badge.
@@ -89,6 +150,10 @@ async function fetchSDRDescription() {
     const callsign  = d.receiver && d.receiver.callsign  ? d.receiver.callsign  : null;
     const maidenhead = d.receiver && d.receiver.gps && d.receiver.gps.maidenhead
       ? d.receiver.gps.maidenhead : null;
+    if (maidenhead) {
+      state.receiverGrid = maidenhead;
+      updateSpecGridBadges(); // update any already-rendered spectrum panels
+    }
     const el = document.getElementById('sdr-info');
     if (!el) return;
     if (!callsign && !maidenhead) return;
@@ -541,7 +606,7 @@ function drawMiniSpectra() {
       wrapper.id = `spec-wrap-${canvasId}`;
       wrapper.style.cssText = 'margin-bottom:16px';
       const gridBadge = s.config.grid
-        ? `<span style="margin-left:auto;color:var(--green);font-weight:600;font-size:0.78rem">📍 ${s.config.grid}</span>`
+        ? `<span id="spec-grid-${canvasId}" style="margin-left:auto;color:var(--green);font-weight:600;font-size:0.78rem">${specGridText(s.config.grid)}</span>`
         : '';
       wrapper.innerHTML = `
         <div style="font-size:0.82rem;color:var(--muted);margin-bottom:4px;display:flex;align-items:center">
@@ -1904,6 +1969,16 @@ document.addEventListener('DOMContentLoaded', async () => {
   }
 
   // ── Preset selector ──────────────────────────────────────────────────────
+  // Known Maidenhead locators for preset stations
+  const PRESET_GRID = {
+    'WWV-2.5':  'DN70lq',
+    'WWV-5':    'DN70lq',
+    'WWV-10':   'DN70lq',
+    'WWV-15':   'DN70lq',
+    'WWV-20':   'DN70lq',
+    'WWV-25':   'DN70lq',
+  };
+
   const presetSel = document.getElementById('f-preset');
   if (presetSel) {
     presetSel.addEventListener('change', () => {
@@ -1915,6 +1990,9 @@ document.addEventListener('DOMContentLoaded', async () => {
       if (label.startsWith('REF-')) {
         document.getElementById('f-reference').checked = true;
       }
+      // Auto-fill grid square if known for this preset
+      const gridEl = document.getElementById('f-grid');
+      if (gridEl) gridEl.value = PRESET_GRID[label] || '';
       presetSel.value = '';
     });
   }
