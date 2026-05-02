@@ -807,6 +807,22 @@ function initCharts() {
             // Hide the min/max band datasets from the legend
             filter: item => !item.text.endsWith(' min') && !item.text.endsWith(' max'),
           },
+          // When a station's mean-line is toggled, also toggle its band datasets
+          onClick(e, legendItem, legend) {
+            const chart = legend.chart;
+            const clickedLabel = legendItem.text;
+            // Toggle the clicked dataset (default Chart.js behaviour)
+            const clickedDs = chart.data.datasets[legendItem.datasetIndex];
+            const nowHidden = !clickedDs.hidden;
+            clickedDs.hidden = nowHidden;
+            // Also toggle the corresponding min/max band datasets
+            chart.data.datasets.forEach(ds => {
+              if (ds._isBand && (ds.label === clickedLabel + ' min' || ds.label === clickedLabel + ' max')) {
+                ds.hidden = nowHidden;
+              }
+            });
+            chart.update('none');
+          },
         },
         tooltip: {
           filter: item => !item.dataset._isBand,
@@ -1204,6 +1220,21 @@ async function loadHistory() {
         });
         snrPoints.push({ x: new Date(m.timestamp), y: m.snr_db });
         powerPoints.push({ x: new Date(m.timestamp), y: m.signal_dbfs });
+      }
+
+      // If the station currently has no valid signal, append a trailing null sentinel
+      // so the gap is already "open" in the dataset.  appendLivePoint() checks for an
+      // existing trailing null before pushing its own, so this prevents a double-null
+      // seam (and therefore duplicate "No signal" annotations) at the history/live boundary.
+      const stationState = state.stations.find(st => st.config && st.config.label === label);
+      const currentlyNoSignal = stationState && stationState.current && !stationState.current.valid;
+      if (currentlyNoSignal && dopplerPoints.length > 0 && dopplerPoints[dopplerPoints.length - 1].y !== null) {
+        const nowTs = new Date();
+        dopplerPoints.push({ x: nowTs, y: null });
+        dopplerMinPoints.push({ x: nowTs, y: null });
+        dopplerMaxPoints.push({ x: nowTs, y: null });
+        snrPoints.push({ x: nowTs, y: null });
+        powerPoints.push({ x: nowTs, y: null });
       }
 
       // Push min band (lower boundary), then max band (upper boundary, fills down to min)
@@ -1649,8 +1680,8 @@ const gapAnnotationPlugin = {
     ctx.clip();
 
     chart.data.datasets.forEach(ds => {
-      // Only annotate the mean-line datasets (not band datasets)
-      if (ds._isBand) return;
+      // Only annotate visible mean-line datasets (not band datasets, not hidden)
+      if (ds._isBand || ds.hidden) return;
       const data = ds.data;
       if (!data || data.length < 2) return;
 
