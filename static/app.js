@@ -971,9 +971,24 @@ function attachChartZoomHandlers(canvas, chart) {
     // If not currently zoomed in, scrolling out does nothing
     if (zoomingOut && state.zoomedXMin === null) return;
 
-    // Current visible range (fall back to full data range when not zoomed)
-    const curMin = state.zoomedXMin ?? xScale.min;
-    const curMax = state.zoomedXMax ?? xScale.max;
+    // Full data extent — read from the chart's parsed data, not xScale.min/max
+    // (xScale.min/max reflect the current zoom level, not the full range)
+    let dataMin = Infinity, dataMax = -Infinity;
+    for (const ds of chart.data.datasets) {
+      for (const pt of ds.data) {
+        if (!pt || pt.x == null) continue;
+        const t = pt.x instanceof Date ? pt.x.getTime() : pt.x;
+        if (t < dataMin) dataMin = t;
+        if (t > dataMax) dataMax = t;
+      }
+    }
+    if (!isFinite(dataMin)) return;
+    const fullRange = dataMax - dataMin;
+    if (fullRange <= 0) return;
+
+    // Current visible range
+    const curMin = state.zoomedXMin ?? dataMin;
+    const curMax = state.zoomedXMax ?? dataMax;
     const range  = curMax - curMin;
     if (range <= 0) return;
 
@@ -985,13 +1000,8 @@ function attachChartZoomHandlers(canvas, chart) {
     const factor = zoomingOut ? 1.4 : 0.7;   // scroll up = zoom in, down = zoom out
     const newRange = range * factor;
 
-    // Clamp to the full data extent
-    const dataMin = xScale.min;
-    const dataMax = xScale.max;
-    const fullRange = dataMax - dataMin;
-
     // If zooming out to (or beyond) the full range, just reset
-    if (newRange >= fullRange * 0.999) {
+    if (newRange >= fullRange) {
       resetChartZoom();
       return;
     }
@@ -1000,6 +1010,7 @@ function attachChartZoomHandlers(canvas, chart) {
     let newMin = curMin + frac * (range - newRange);
     let newMax = newMin + newRange;
 
+    // Clamp to full data extent
     if (newMin < dataMin) { newMin = dataMin; newMax = dataMin + newRange; }
     if (newMax > dataMax) { newMax = dataMax; newMin = dataMax - newRange; }
 
