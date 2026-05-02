@@ -792,10 +792,10 @@ function initCharts() {
               scale.min = dataMin;
               scale.max = dataMax;
             }
-            // Enforce ±0.5 Hz minimum span in doppler mode
+            // Enforce ±0.1 Hz minimum span in doppler mode
             if (state.chartMode === 'doppler') {
-              if (scale.max < 0.5)  scale.max = 0.5;
-              if (scale.min > -0.5) scale.min = -0.5;
+              if (scale.max < 0.1)  scale.max = 0.1;
+              if (scale.min > -0.1) scale.min = -0.1;
             }
           },
         },
