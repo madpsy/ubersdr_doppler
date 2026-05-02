@@ -540,12 +540,16 @@ function drawMiniSpectra() {
       wrapper = document.createElement('div');
       wrapper.id = `spec-wrap-${canvasId}`;
       wrapper.style.cssText = 'margin-bottom:16px';
+      const gridBadge = s.config.grid
+        ? `<span style="margin-left:auto;color:var(--green);font-weight:600;font-size:0.78rem">📍 ${s.config.grid}</span>`
+        : '';
       wrapper.innerHTML = `
-        <div style="font-size:0.82rem;color:var(--muted);margin-bottom:4px">
-          <span class="station-dot" style="background:${colourForIndex(i)};display:inline-block;width:10px;height:10px;border-radius:50%;margin-right:6px;vertical-align:middle"></span>
+        <div style="font-size:0.82rem;color:var(--muted);margin-bottom:4px;display:flex;align-items:center">
+          <span class="station-dot" style="background:${colourForIndex(i)};display:inline-block;width:10px;height:10px;border-radius:50%;margin-right:6px;flex-shrink:0"></span>
           <strong style="color:var(--text)">${label}</strong>${refBadge}
           <span style="margin-left:8px">${fmtHz(s.config.freq_hz)}</span>
           <span id="spec-info-${canvasId}" style="margin-left:12px;color:var(--accent)"></span>
+          ${gridBadge}
         </div>
         <canvas id="${canvasId}" width="500" height="100" style="width:100%;height:100px;background:var(--bg);border-radius:4px;border:1px solid var(--border);cursor:crosshair"></canvas>`;
       container.appendChild(wrapper);
