@@ -29,6 +29,7 @@ const state = {
   historyHours: 24,
   showSNR: true,
   showPower: true,
+  showBand: true,    // show min/max jitter band on doppler history chart
   showRef: false,    // show reference station on history charts (off by default)
   chartMode: 'doppler',  // 'doppler' | 'absolute'
   specIntervalS: 2,      // spectrum push interval in seconds (1–5)
@@ -905,6 +906,16 @@ function dopplerToY(dopplerHz, nominalFreqHz) {
   return dopplerHz;
 }
 
+// Show or hide all _isBand datasets on the doppler chart based on state.showBand.
+function applyBandVisibility() {
+  const chart = state.dopplerChart;
+  if (!chart) return;
+  chart.data.datasets.forEach(ds => {
+    if (ds._isBand) ds.hidden = !state.showBand;
+  });
+  chart.update('none');
+}
+
 function updateDopplerChartAxis() {
   const chart = state.dopplerChart;
   if (!chart) return;
@@ -1022,6 +1033,7 @@ async function loadHistory() {
   }
 
   updateDopplerChartAxis();
+  applyBandVisibility();
   state.dopplerChart.update('none');
   state.snrChart.update('none');
   state.powerChart.update('none');
@@ -1653,6 +1665,15 @@ document.addEventListener('DOMContentLoaded', async () => {
       state.showPower = e.target.checked;
       const wrap = document.getElementById('power-chart-wrap');
       if (wrap) wrap.style.display = state.showPower ? '' : 'none';
+    });
+  }
+
+  // ── Min/max band toggle ──────────────────────────────────────────────────
+  const showBandEl = document.getElementById('show-band');
+  if (showBandEl) {
+    showBandEl.addEventListener('change', e => {
+      state.showBand = e.target.checked;
+      applyBandVisibility();
     });
   }
 
