@@ -105,6 +105,10 @@ function updateAuthUI() {
   if (settingsForm) {
     const submitBtn = settingsForm.querySelector('button[type="submit"]');
     if (submitBtn) submitBtn.style.display = canWrite ? '' : 'none';
+    // Disable/enable all inputs, selects and textareas in the settings form
+    settingsForm.querySelectorAll('input, select, textarea').forEach(el => {
+      el.disabled = !canWrite;
+    });
   }
   // Station edit/remove buttons are rendered dynamically in renderStationList()
 }
