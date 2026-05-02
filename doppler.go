@@ -774,26 +774,27 @@ func (ds *DopplerStation) runSpectrumLoop(ctx context.Context) {
 			ds.latestBinBW = binBW
 			ds.mu.Unlock()
 
-			// Write 1-second reading to Grape CSV
-			if reading.Valid {
-				ds.csvWriter.writeReading(ds.cfg, reading)
-			}
-
-			// Accumulate for minute-mean
-			if reading.Valid {
-				ds.sampleMu.Lock()
-				ds.samples = append(ds.samples, reading)
-				ds.sampleMu.Unlock()
-			}
-
-			// Attach reference correction before broadcasting to SSE clients.
-			// The refProvider returns the reference station's clock error in ppm,
-			// which we scale to this station's frequency before subtracting.
+			// Attach reference correction. Must be done before accumulating the
+			// sample so that aggregateMinute() sees per-sample corrected values
+			// and can compute a proper corrected mean/min/max rather than a
+			// single instantaneous snapshot at aggregation time.
 			if reading.Valid && ds.refProvider != nil && !ds.cfg.IsReference {
 				if refPPM, ok := ds.refProvider(); ok {
 					c := reading.DopplerHz - refPPM*float64(ds.cfg.FreqHz)/1e6
 					reading.CorrectedDopplerHz = &c
 				}
+			}
+
+			// Write 1-second reading to Grape CSV
+			if reading.Valid {
+				ds.csvWriter.writeReading(ds.cfg, reading)
+			}
+
+			// Accumulate for minute-mean (correction already attached above)
+			if reading.Valid {
+				ds.sampleMu.Lock()
+				ds.samples = append(ds.samples, reading)
+				ds.sampleMu.Unlock()
 			}
 
 			// Push live update to SSE clients
