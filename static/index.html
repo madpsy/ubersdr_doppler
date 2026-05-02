@@ -8,6 +8,7 @@
   <script>window.BASE_PATH = "{{.BasePath}}";</script>
   <script src="chart.umd.min.js"></script>
   <script src="chartjs-adapter-date-fns.bundle.min.js"></script>
+  <script src="suncalc.js"></script>
   <script src="audio-analysis.js"></script>
 </head>
 <body>
@@ -184,6 +185,9 @@
           </label>
           <label class="checkbox-label" id="show-ref-label" style="display:none">
             <input type="checkbox" id="show-ref-station"> Reference
+          </label>
+          <label class="checkbox-label" title="Show sunrise/sunset lines at the midpoint between receiver and first station">
+            <input type="checkbox" id="show-midpoint-sun" checked> Midpoint Sun
           </label>
         </div>
       </div>
