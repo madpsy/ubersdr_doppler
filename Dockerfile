@@ -18,6 +18,7 @@ FROM debian:bookworm-slim
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates \
+        wget \
     && rm -rf /var/lib/apt/lists/* \
     && useradd -r -s /bin/false doppler
 
@@ -40,7 +41,7 @@ USER doppler
 # Expose the web UI port (default; override with WEB_PORT env var)
 EXPOSE 6096
 
-HEALTHCHECK --interval=60s --timeout=5s --retries=3 \
-    CMD ["/usr/local/bin/ubersdr_doppler", "-help"] || exit 1
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+    CMD ["/usr/bin/wget", "-q", "-O", "/dev/null", "http://localhost:6096/"]
 
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
