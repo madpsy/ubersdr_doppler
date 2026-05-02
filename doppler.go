@@ -1127,6 +1127,28 @@ func (ds *DopplerStation) aggregateMinute() {
 			correctedCount++
 		}
 	}
+
+	// If we have corrected values for the majority of samples, recompute min/max
+	// from the corrected series so the band stays aligned with the corrected mean line.
+	if correctedCount >= len(samples)/2 {
+		first := samples[0].CorrectedDopplerHz
+		if first != nil {
+			minHz = *first
+			maxHz = *first
+		}
+		for _, s := range samples {
+			if s.CorrectedDopplerHz == nil {
+				continue
+			}
+			v := *s.CorrectedDopplerHz
+			if v < minHz {
+				minHz = v
+			}
+			if v > maxHz {
+				maxHz = v
+			}
+		}
+	}
 	n := float64(len(samples))
 	meanDoppler := sumDoppler / n
 
