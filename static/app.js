@@ -300,11 +300,16 @@ function renderStatusTable() {
     if (showRef) {
       if (isRef) {
         corrCell = '<td style="color:var(--muted)">— (ref)</td>';
-      } else if (s.corrected_doppler_hz !== null && s.corrected_doppler_hz !== undefined) {
-        const cHz = s.corrected_doppler_hz;
-        corrCell = `<td class="${dopplerClass(cHz)}">${fmtDoppler(cHz)}</td>`;
       } else {
-        corrCell = '<td class="invalid">—</td>';
+        // Prefer corrected value from the live reading; fall back to cached station value
+        const cHz = (valid && r.corrected_doppler_hz !== null && r.corrected_doppler_hz !== undefined)
+          ? r.corrected_doppler_hz
+          : (s.corrected_doppler_hz !== null && s.corrected_doppler_hz !== undefined ? s.corrected_doppler_hz : null);
+        if (cHz !== null) {
+          corrCell = `<td class="${dopplerClass(cHz)}">${fmtDoppler(cHz)}</td>`;
+        } else {
+          corrCell = '<td class="invalid">—</td>';
+        }
       }
     }
 
