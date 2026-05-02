@@ -45,7 +45,7 @@ const (
 
 // pcmPacket is the result of decoding one binary WebSocket message.
 type pcmPacket struct {
-	pcm          []byte  // little-endian int16 PCM samples
+	pcm          []byte // little-endian int16 PCM samples
 	sampleRate   int
 	channels     int
 	hasSigInfo   bool    // true only for v2 full-header packets

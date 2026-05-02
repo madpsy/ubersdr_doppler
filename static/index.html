@@ -97,6 +97,7 @@
         using a power-weighted centroid over the 3 dB peak region — the same algorithm used by the UberSDR
         frequency reference monitor. Typical precision is <strong>~0.01 Hz</strong> at SNR &gt; 20 dB.
         Spectrum updates every ~2 seconds; minute means average ~30 samples.
+        Once a station drops to <em>No signal</em>, it will not return to a valid state until the signal has been continuously above the SNR threshold for a full minute.
       </p>
       <div class="table-wrap">
         <table id="status-table">

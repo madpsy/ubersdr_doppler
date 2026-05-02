@@ -193,10 +193,17 @@ func (d *spectrumDecoder) decode(data []byte) ([]float32, bool) {
 type audioBroadcastHub struct {
 	mu      sync.Mutex
 	clients map[chan []byte]struct{}
+	// drainCh is closed (and replaced) whenever the last listener unsubscribes.
+	// runAudioLoop selects on this to disconnect the WebSocket immediately
+	// rather than waiting for the 500 ms poll interval.
+	drainCh chan struct{}
 }
 
 func newAudioBroadcastHub() *audioBroadcastHub {
-	return &audioBroadcastHub{clients: make(map[chan []byte]struct{})}
+	return &audioBroadcastHub{
+		clients: make(map[chan []byte]struct{}),
+		drainCh: make(chan struct{}),
+	}
 }
 
 func (h *audioBroadcastHub) subscribe() chan []byte {
@@ -210,8 +217,27 @@ func (h *audioBroadcastHub) subscribe() chan []byte {
 func (h *audioBroadcastHub) unsubscribe(ch chan []byte) {
 	h.mu.Lock()
 	delete(h.clients, ch)
+	empty := len(h.clients) == 0
+	drainCh := h.drainCh
+	if empty {
+		// Replace drainCh so the next subscribe/unsubscribe cycle gets a fresh channel.
+		h.drainCh = make(chan struct{})
+	}
 	h.mu.Unlock()
 	close(ch)
+	if empty {
+		// Signal runAudioLoop to disconnect immediately.
+		close(drainCh)
+	}
+}
+
+// drained returns a channel that is closed when the last listener unsubscribes.
+// The caller must re-read this after each subscribe/unsubscribe cycle because
+// the channel is replaced on every drain event.
+func (h *audioBroadcastHub) drained() <-chan struct{} {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.drainCh
 }
 
 func (h *audioBroadcastHub) broadcast(pcm []byte) {
@@ -253,6 +279,11 @@ const (
 
 	// History depth for minute-means (24 hours × 60 minutes).
 	historyDepth = 24 * 60
+
+	// signalRecoveryDuration is the minimum continuous valid-signal duration
+	// required before a station exits the no-signal state.  This prevents
+	// brief SNR spikes from prematurely clearing a no-signal condition.
+	signalRecoveryDuration = 60 * time.Second
 )
 
 // DopplerStation monitors one standard time/frequency station.
@@ -295,6 +326,12 @@ type DopplerStation struct {
 	latestBins  []float32 // latest unwrapped spectrum bins for display
 	latestPeak  int       // peak bin index in latestBins (-1 if no valid signal)
 	latestBinBW float64   // actual bin bandwidth (Hz) reported by server
+
+	// Signal-recovery debounce: once a station drops to no-signal it must
+	// sustain a continuously valid signal for signalRecoveryDuration before
+	// Valid is reported as true again.  Protected by mu.
+	noSignal    bool      // true while in the debounced no-signal state
+	signalSince time.Time // wall-clock time the current valid-signal run started
 
 	// 1-second sample accumulator for minute-mean calculation.
 	sampleMu sync.Mutex
@@ -763,11 +800,42 @@ func (ds *DopplerStation) runSpectrumLoop(ctx context.Context) {
 			reading, peakBin := detectDopplerWithPeak(bins, binBW, ds.minSNR, ds.maxDriftHz)
 			reading.Timestamp = time.Now().UTC()
 
+			// ── Signal-recovery debounce ──────────────────────────────────────
+			// Once a station drops to no-signal it must sustain a continuously
+			// valid signal for signalRecoveryDuration (60 s) before Valid is
+			// reported as true again.  This prevents brief SNR spikes from
+			// prematurely clearing a no-signal condition.
+			now := time.Now()
+			ds.mu.Lock()
+			if !reading.Valid {
+				// Signal lost (or still absent): enter/stay in no-signal state
+				// and reset the recovery timer.
+				ds.noSignal = true
+				ds.signalSince = time.Time{} // zero = no valid run in progress
+			} else if ds.noSignal {
+				// Raw signal is valid but we are still in the no-signal state.
+				if ds.signalSince.IsZero() {
+					// First valid reading after a no-signal period — start timer.
+					ds.signalSince = now
+				}
+				if now.Sub(ds.signalSince) < signalRecoveryDuration {
+					// Not yet recovered: suppress Valid so the station stays in
+					// no-signal state for the broadcast and CSV/history.
+					reading.Valid = false
+				} else {
+					// 60 s of continuous valid signal — exit no-signal state.
+					ds.noSignal = false
+					log.Printf("[%s] signal recovered after %.0f s", ds.cfg.Label,
+						now.Sub(ds.signalSince).Seconds())
+				}
+			}
+			// (If ds.noSignal is false and reading.Valid is true, the station
+			// is already in a healthy state — no action needed.)
+
 			// Store spectrum snapshot for the mini-spectrum display
 			binsCopy := make([]float32, len(bins))
 			copy(binsCopy, bins)
 
-			ds.mu.Lock()
 			ds.current = reading
 			ds.latestBins = binsCopy
 			ds.latestPeak = peakBin
@@ -808,6 +876,7 @@ func (ds *DopplerStation) runSpectrumLoop(ctx context.Context) {
 
 // runAudioLoop connects to UberSDR's audio WebSocket for preview streaming.
 // Only maintains the connection when there are active preview listeners.
+// Disconnects immediately when the last listener unsubscribes (via audioHub.drained()).
 func (ds *DopplerStation) runAudioLoop(ctx context.Context) {
 	dec, err := newPCMDecoder()
 	if err != nil {
@@ -821,11 +890,21 @@ func (ds *DopplerStation) runAudioLoop(ctx context.Context) {
 			return
 		}
 
-		// Only connect when there are preview listeners
+		// Wait until there is at least one preview listener.
+		// Poll with a short sleep; the drained() channel handles the fast-path
+		// disconnect once we are connected.
 		if !ds.audioHub.hasListeners() {
-			time.Sleep(500 * time.Millisecond)
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(500 * time.Millisecond):
+			}
 			continue
 		}
+
+		// Snapshot the drained channel before connecting so we can detect
+		// the last-listener-gone event while the WebSocket is live.
+		drainedCh := ds.audioHub.drained()
 
 		// Reuse the spectrum session UUID so both connections share the same
 		// user_session_id. If the spectrum loop hasn't connected yet, fall back
@@ -837,7 +916,11 @@ func (ds *DopplerStation) runAudioLoop(ctx context.Context) {
 			sessionID = uuid.New().String()
 		}
 		if err := ds.checkConnection(sessionID); err != nil {
-			time.Sleep(10 * time.Second)
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(10 * time.Second):
+			}
 			continue
 		}
 
@@ -857,56 +940,98 @@ func (ds *DopplerStation) runAudioLoop(ctx context.Context) {
 		hdr.Set("User-Agent", "ubersdr_doppler/1.0")
 		conn, _, err := wsDialer.Dial(wsAddr, hdr)
 		if err != nil {
-			time.Sleep(10 * time.Second)
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(10 * time.Second):
+			}
 			continue
 		}
 
 		log.Printf("[%s] audio preview connected", ds.cfg.Label)
 
-		localCtx, localCancel := context.WithCancel(ctx)
+		// connCtx is cancelled to stop the keepalive goroutine and the read
+		// goroutine whenever we decide to close this connection.
+		connCtx, connCancel := context.WithCancel(ctx)
+
+		// Keepalive pings
 		go func() {
 			ticker := time.NewTicker(30 * time.Second)
 			defer ticker.Stop()
 			for {
 				select {
-				case <-localCtx.Done():
+				case <-connCtx.Done():
 					return
 				case <-ticker.C:
-					conn.WriteJSON(map[string]string{"type": "ping"})
+					conn.WriteJSON(map[string]string{"type": "ping"}) //nolint:errcheck
 				}
 			}
 		}()
 
+		// Read loop runs in its own goroutine so we can select on drainedCh
+		// without blocking on conn.ReadMessage().
+		type readResult struct {
+			msgType int
+			msg     []byte
+			err     error
+		}
+		readCh := make(chan readResult, 4)
+		go func() {
+			for {
+				mt, m, e := conn.ReadMessage()
+				readCh <- readResult{mt, m, e}
+				if e != nil {
+					return
+				}
+			}
+		}()
+
+	readLoop:
 		for {
-			if ctx.Err() != nil || !ds.audioHub.hasListeners() {
-				localCancel()
+			select {
+			case <-ctx.Done():
+				// Server shutting down — close and exit.
+				connCancel()
 				conn.Close()
-				break
-			}
-			msgType, msg, err := conn.ReadMessage()
-			if err != nil {
-				localCancel()
+				return
+
+			case <-drainedCh:
+				// Last listener disconnected — close WebSocket immediately.
+				log.Printf("[%s] audio preview: no listeners, disconnecting", ds.cfg.Label)
+				connCancel()
 				conn.Close()
-				break
+				break readLoop
+
+			case res := <-readCh:
+				if res.err != nil {
+					connCancel()
+					conn.Close()
+					break readLoop
+				}
+				if res.msgType != websocket.BinaryMessage {
+					continue
+				}
+				pkt, err := dec.decode(res.msg, true)
+				if err != nil || len(pkt.pcm) == 0 {
+					continue
+				}
+				// Update sample rate from full-header packets
+				if pkt.sampleRate > 0 {
+					ds.streamMu.Lock()
+					ds.streamSampleRate = pkt.sampleRate
+					ds.streamMu.Unlock()
+				}
+				ds.audioHub.broadcast(pkt.pcm)
 			}
-			if msgType != websocket.BinaryMessage {
-				continue
-			}
-			pkt, err := dec.decode(msg, true)
-			if err != nil || len(pkt.pcm) == 0 {
-				continue
-			}
-			// Update sample rate
-			if pkt.sampleRate > 0 {
-				ds.streamMu.Lock()
-				ds.streamSampleRate = pkt.sampleRate
-				ds.streamMu.Unlock()
-			}
-			ds.audioHub.broadcast(pkt.pcm)
 		}
 
-		localCancel()
-		time.Sleep(2 * time.Second)
+		connCancel()
+		// Brief pause before reconnecting (avoids hammering UberSDR on errors).
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(2 * time.Second):
+		}
 	}
 }
 

@@ -1402,8 +1402,11 @@ function connectSSE() {
         if (s) {
           s.current = reading;
           // Keep corrected_doppler_hz on the station object in sync with the live reading
-          // so the status table column updates every second (not just on /api/stations polls)
-          if (reading.corrected_doppler_hz !== undefined) {
+          // so the status table column updates every second (not just on /api/stations polls).
+          // Clear it when the reading is invalid (no signal) so the column shows "—".
+          if (!reading.valid) {
+            s.corrected_doppler_hz = null;
+          } else if (reading.corrected_doppler_hz !== undefined) {
             s.corrected_doppler_hz = reading.corrected_doppler_hz;
           }
           renderStatusTable();
@@ -1513,7 +1516,7 @@ function openModal(title, cfg = {}) {
   document.getElementById('f-freq').value = cfg.freq_hz || '';
   document.getElementById('f-callsign').value = cfg.callsign || '';
   document.getElementById('f-grid').value = cfg.grid || '';
-  document.getElementById('f-min-snr').value = cfg.min_snr ?? 10;
+  document.getElementById('f-min-snr').value = cfg.min_snr ?? 30;
   document.getElementById('f-max-drift').value = cfg.max_drift_hz ?? 50;
   document.getElementById('f-enabled').checked = cfg.enabled !== false;
   document.getElementById('f-reference').checked = cfg.is_reference === true;
