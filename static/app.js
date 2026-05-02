@@ -691,10 +691,15 @@ function drawMiniSpectrum(canvasId, s, stationIdx) {
       ctx.lineTo(peakX, plotH);
       ctx.stroke();
     }
-    const dHz = s.current.doppler_hz;
+    // Prefer corrected Doppler for the info label (matches the history chart)
+    const rawHz = s.current.doppler_hz;
+    const dHz = (s.current.corrected_doppler_hz !== null && s.current.corrected_doppler_hz !== undefined)
+      ? s.current.corrected_doppler_hz : rawHz;
     const sign = dHz >= 0 ? '+' : '';
+    const corrLabel = (s.current.corrected_doppler_hz !== null && s.current.corrected_doppler_hz !== undefined)
+      ? ' (corr)' : '';
     if (infoEl) {
-      infoEl.textContent = `${sign}${dHz.toFixed(3)} Hz  SNR: ${s.current.snr_db.toFixed(1)} dB`;
+      infoEl.textContent = `${sign}${dHz.toFixed(3)} Hz${corrLabel}  SNR: ${s.current.snr_db.toFixed(1)} dB`;
       infoEl.style.color = Math.abs(dHz) < 0.5 ? 'var(--green)' : 'var(--accent)';
     }
   } else if (peakBin >= 0 && peakBin < n) {
