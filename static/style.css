@@ -61,6 +61,27 @@ header {
 .header-left h1 { font-size: 1.3rem; font-weight: 600; }
 .header-left .subtitle { color: var(--muted); font-size: 0.82rem; margin-top: 2px; }
 
+/* SDR info badge (maidenhead + callsign from /api/description) */
+.sdr-info-badge {
+  font-size: 0.78rem;
+  color: var(--muted);
+  padding: 4px 10px;
+  border-radius: 20px;
+  border: 1px solid var(--border);
+  background: rgba(255,255,255,0.03);
+  margin-right: 10px;
+  white-space: nowrap;
+}
+.sdr-info-badge .sdr-callsign {
+  color: var(--accent);
+  font-weight: 600;
+  margin-right: 6px;
+}
+.sdr-info-badge .sdr-grid {
+  color: var(--green);
+  font-weight: 600;
+}
+
 /* Connection badge */
 .conn-badge {
   font-size: 0.8rem;

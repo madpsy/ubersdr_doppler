@@ -77,6 +77,32 @@ window.toggleAudioPreview = function(label) {
 };
 
 // ---------------------------------------------------------------------------
+// SDR description — fetched from the base domain (origin root) on load.
+// Extracts receiver.gps.maidenhead and receiver.callsign and shows them in
+// the header's #sdr-info badge.
+// ---------------------------------------------------------------------------
+async function fetchSDRDescription() {
+  try {
+    const r = await fetch(window.location.origin + '/api/description');
+    if (!r.ok) return;
+    const d = await r.json();
+    const callsign  = d.receiver && d.receiver.callsign  ? d.receiver.callsign  : null;
+    const maidenhead = d.receiver && d.receiver.gps && d.receiver.gps.maidenhead
+      ? d.receiver.gps.maidenhead : null;
+    const el = document.getElementById('sdr-info');
+    if (!el) return;
+    if (!callsign && !maidenhead) return;
+    const parts = [];
+    if (callsign)   parts.push(`<span class="sdr-callsign">${callsign}</span>`);
+    if (maidenhead) parts.push(`<span class="sdr-grid">📍 ${maidenhead}</span>`);
+    el.innerHTML = parts.join('<span style="color:var(--border);margin:0 4px">|</span>');
+    el.style.display = '';
+  } catch (e) {
+    console.warn('SDR description fetch failed:', e);
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Auth
 // ---------------------------------------------------------------------------
 async function checkAuthStatus() {
@@ -1793,6 +1819,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   startSpecRenderLoop();
   startStalenessTicker();
   startHistoryRefreshTicker();
+  fetchSDRDescription(); // fire-and-forget — non-blocking
   await checkAuthStatus();
   await loadSettings();
   await loadStations();
