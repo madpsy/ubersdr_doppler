@@ -330,6 +330,7 @@ type DopplerStation struct {
 	// Signal-recovery debounce: once a station drops to no-signal it must
 	// sustain a continuously valid signal for signalRecoveryDuration before
 	// Valid is reported as true again.  Protected by mu.
+	hadSignal   bool      // true once the station has had at least one valid reading
 	noSignal    bool      // true while in the debounced no-signal state
 	signalSince time.Time // wall-clock time the current valid-signal run started
 
@@ -808,10 +809,14 @@ func (ds *DopplerStation) runSpectrumLoop(ctx context.Context) {
 			now := time.Now()
 			ds.mu.Lock()
 			if !reading.Valid {
-				// Signal lost (or still absent): enter/stay in no-signal state
-				// and reset the recovery timer.
-				ds.noSignal = true
-				ds.signalSince = time.Time{} // zero = no valid run in progress
+				// Signal lost (or still absent): only enter the no-signal state
+				// if the station has previously had a valid reading.  This
+				// prevents the normal connection warm-up period on startup from
+				// triggering the 60-second recovery hold-off.
+				if ds.hadSignal {
+					ds.noSignal = true
+					ds.signalSince = time.Time{} // zero = no valid run in progress
+				}
 			} else if ds.noSignal {
 				// Raw signal is valid but we are still in the no-signal state.
 				if ds.signalSince.IsZero() {
@@ -828,6 +833,10 @@ func (ds *DopplerStation) runSpectrumLoop(ctx context.Context) {
 					log.Printf("[%s] signal recovered after %.0f s", ds.cfg.Label,
 						now.Sub(ds.signalSince).Seconds())
 				}
+			} else {
+				// Valid reading and not in no-signal state — mark that we have
+				// had at least one good reading so future losses trigger the debounce.
+				ds.hadSignal = true
 			}
 			// (If ds.noSignal is false and reading.Valid is true, the station
 			// is already in a healthy state — no action needed.)
