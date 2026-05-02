@@ -1155,11 +1155,37 @@ async function loadHistory() {
         ? history  // server already filtered to the day
         : history.filter(m => new Date(m.timestamp).getTime() >= cutoff);
 
-      // Use corrected Doppler when available (reference station offset applied)
-      const dopplerPoints = filtered.map(m => {
+      // Build chart point arrays, inserting null sentinels between consecutive
+      // minute-mean entries that are more than 2 minutes apart.  MinuteMean
+      // records only exist for minutes with valid signal, so a gap > 2 min
+      // means the station had no signal during that period.  The null sentinel
+      // causes Chart.js (spanGaps: false) to break the line across the gap.
+      const GAP_THRESHOLD_MS = 2 * 60 * 1000; // 2 minutes
+      const dopplerPoints = [];
+      const dopplerMinPoints = [];
+      const dopplerMaxPoints = [];
+      const snrPoints = [];
+      const powerPoints = [];
+
+      for (let mi = 0; mi < filtered.length; mi++) {
+        const m = filtered[mi];
+        // Insert null sentinel if there is a gap before this point
+        if (mi > 0) {
+          const prevTs = new Date(filtered[mi - 1].timestamp).getTime();
+          const curTs  = new Date(m.timestamp).getTime();
+          if (curTs - prevTs > GAP_THRESHOLD_MS) {
+            // Place the sentinel halfway through the gap so the break is centred
+            const midTs = new Date((prevTs + curTs) / 2);
+            dopplerPoints.push({ x: midTs, y: null });
+            dopplerMinPoints.push({ x: midTs, y: null });
+            dopplerMaxPoints.push({ x: midTs, y: null });
+            snrPoints.push({ x: midTs, y: null });
+            powerPoints.push({ x: midTs, y: null });
+          }
+        }
         const hz = (m.corrected_doppler_hz !== null && m.corrected_doppler_hz !== undefined)
           ? m.corrected_doppler_hz : m.doppler_hz;
-        return {
+        dopplerPoints.push({
           x: new Date(m.timestamp),
           y: dopplerToY(hz, nominalHz),
           // Attach scientific stats for tooltip
@@ -1167,20 +1193,18 @@ async function loadHistory() {
           max: m.max_doppler_hz,
           std: m.std_dev_hz,
           count: m.count,
-        };
-      });
-      // Min/max band: lower boundary dataset (filled up to the mean line)
-      const dopplerMinPoints = filtered.map(m => ({
-        x: new Date(m.timestamp),
-        y: m.min_doppler_hz !== undefined ? dopplerToY(m.min_doppler_hz, nominalHz) : null,
-      }));
-      const dopplerMaxPoints = filtered.map(m => ({
-        x: new Date(m.timestamp),
-        y: m.max_doppler_hz !== undefined ? dopplerToY(m.max_doppler_hz, nominalHz) : null,
-      }));
-
-      const snrPoints   = filtered.map(m => ({ x: new Date(m.timestamp), y: m.snr_db }));
-      const powerPoints = filtered.map(m => ({ x: new Date(m.timestamp), y: m.signal_dbfs }));
+        });
+        dopplerMinPoints.push({
+          x: new Date(m.timestamp),
+          y: m.min_doppler_hz !== undefined ? dopplerToY(m.min_doppler_hz, nominalHz) : null,
+        });
+        dopplerMaxPoints.push({
+          x: new Date(m.timestamp),
+          y: m.max_doppler_hz !== undefined ? dopplerToY(m.max_doppler_hz, nominalHz) : null,
+        });
+        snrPoints.push({ x: new Date(m.timestamp), y: m.snr_db });
+        powerPoints.push({ x: new Date(m.timestamp), y: m.signal_dbfs });
+      }
 
       // Push min band (lower boundary), then max band (upper boundary, fills down to min)
       const dMinIdx = state.dopplerChart.data.datasets.length;
@@ -1630,16 +1654,19 @@ const gapAnnotationPlugin = {
       const data = ds.data;
       if (!data || data.length < 2) return;
 
-      let gapStart = null;
+      let gapStart = null;   // timestamp of the null sentinel (start of gap)
+      let lastValidTs = null; // timestamp of the last non-null point seen
       for (let i = 0; i < data.length; i++) {
         const pt = data[i];
+        const ptTs = pt.x instanceof Date ? pt.x.getTime() : new Date(pt.x).getTime();
         const isNull = pt.y === null || pt.y === undefined;
         if (isNull && gapStart === null) {
-          // Gap begins — record the timestamp of the last valid point before it
-          gapStart = pt.x instanceof Date ? pt.x.getTime() : new Date(pt.x).getTime();
+          // Gap begins — use the last valid point's timestamp as the left edge
+          // so the band starts exactly where the signal was last seen.
+          gapStart = lastValidTs !== null ? lastValidTs : ptTs;
         } else if (!isNull && gapStart !== null) {
-          // Gap ends
-          const gapEnd = pt.x instanceof Date ? pt.x.getTime() : new Date(pt.x).getTime();
+          // Gap ends — use this valid point's timestamp as the right edge.
+          const gapEnd = ptTs;
           if (gapEnd - gapStart >= GAP_MIN_MS) {
             const x1 = xScale.getPixelForValue(gapStart);
             const x2 = xScale.getPixelForValue(gapEnd);
@@ -1655,6 +1682,9 @@ const gapAnnotationPlugin = {
             }
           }
           gapStart = null;
+          lastValidTs = ptTs;
+        } else if (!isNull) {
+          lastValidTs = ptTs;
         }
       }
       // Handle a gap that runs to the end of the data.

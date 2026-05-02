@@ -1333,8 +1333,8 @@ func (ds *DopplerStation) aggregateMinute() {
 	}
 	ds.saveHistory() // persist to disk while lock is held
 	ds.mu.Unlock()
-
-	ds.csvWriter.write(ds.cfg, mean, mean.CorrectedDopplerHz)
+	// 1-second readings are already written to CSV by writeReading() in the
+	// measurement loop — do not call write() here or each second is duplicated.
 }
 
 // CurrentReading returns the latest 1-second reading (thread-safe).
