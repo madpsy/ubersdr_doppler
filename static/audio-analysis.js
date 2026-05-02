@@ -80,10 +80,14 @@ const AudioAnalysisModal = (() => {
   // Called by app.js whenever a reading arrives for the active station.
   // ---------------------------------------------------------------------------
   function pushReading(reading) {
-    if (!_open || !reading.valid) return;
-    _lastReading = reading;
+    if (!_open) return;
+    // Only update the FFT "actual" frequency marker when the reading is valid
+    // (invalid readings have no meaningful doppler_hz to plot on the FFT canvas).
+    if (reading.valid) _lastReading = reading;
     const now    = Date.now();
     const cutoff = now - HISTORY_SECS * 1000;
+    // Always record signal/SNR — even when valid=false the backend still measures
+    // the noise floor, so the history panel shows the drop when signal is lost.
     histSignal.push({ t: now, v: reading.signal_dbfs });
     histSNR.push(   { t: now, v: reading.snr_db });
     while (histSignal.length > 0 && histSignal[0].t < cutoff) histSignal.shift();
