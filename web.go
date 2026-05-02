@@ -138,6 +138,7 @@ func (h *sseHub) broadcast(label string, r DopplerReading) {
 		Reading    DopplerReading `json:"reading"`
 		ServerTime time.Time      `json:"server_time"` // wall-clock time of this broadcast; used by the frontend to detect backend→UberSDR staleness
 	}
+	// Note: r.CorrectedDopplerHz is already set by runSpectrumLoop before calling broadcast.
 	data, err := json.Marshal(payload{Station: label, Reading: r, ServerTime: time.Now().UTC()})
 	if err != nil {
 		return

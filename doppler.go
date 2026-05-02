@@ -1131,21 +1131,25 @@ func (ds *DopplerStation) aggregateMinute() {
 	// If we have corrected values for the majority of samples, recompute min/max
 	// from the corrected series so the band stays aligned with the corrected mean line.
 	if correctedCount >= len(samples)/2 {
-		first := samples[0].CorrectedDopplerHz
-		if first != nil {
-			minHz = *first
-			maxHz = *first
-		}
+		// Seed min/max from the first non-nil corrected sample so we never mix
+		// raw and corrected values (samples[0] may not have a correction yet).
+		seeded := false
 		for _, s := range samples {
 			if s.CorrectedDopplerHz == nil {
 				continue
 			}
 			v := *s.CorrectedDopplerHz
-			if v < minHz {
+			if !seeded {
 				minHz = v
-			}
-			if v > maxHz {
 				maxHz = v
+				seeded = true
+			} else {
+				if v < minHz {
+					minHz = v
+				}
+				if v > maxHz {
+					maxHz = v
+				}
 			}
 		}
 	}

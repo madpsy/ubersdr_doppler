@@ -186,7 +186,9 @@ function fmtDoppler(hz) {
 }
 
 function dopplerClass(hz) {
-  if (Math.abs(hz) < 0.01) return 'doppler-zero';
+  // Use 0.0005 as the zero threshold so the class matches what toFixed(3) displays:
+  // any value that would show as "0.000" gets doppler-zero; everything else is coloured.
+  if (Math.abs(hz) < 0.0005) return 'doppler-zero';
   return hz > 0 ? 'doppler-pos' : 'doppler-neg';
 }
 
