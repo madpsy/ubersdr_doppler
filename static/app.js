@@ -883,11 +883,14 @@ function getMidpointSunTimes(xMin, xMax) {
   const midLat = (rxPos.lat + txPos.lat) / 2;
   const midLon = (rxPos.lon + txPos.lon) / 2;
 
-  // Iterate over each UTC calendar day in [xMin, xMax]
+  // Compute sun times for every UTC calendar day that overlaps [xMin, xMax].
+  // We extend the range by one day on each side so that sunrise/sunset events
+  // that fall just outside the data window (e.g. today's sunrise before the
+  // first data point) are still included and drawn within the visible area.
   const results = [];
-  const startDay = new Date(xMin);
+  const startDay = new Date(xMin - 24 * 3600 * 1000);
   startDay.setUTCHours(0, 0, 0, 0);
-  const endMs = xMax;
+  const endMs = xMax + 24 * 3600 * 1000;
 
   for (let d = new Date(startDay); d.getTime() <= endMs; d.setUTCDate(d.getUTCDate() + 1)) {
     const times = SunCalc.getTimes(new Date(d), midLat, midLon);
@@ -910,8 +913,22 @@ const sunLinePlugin = {
     const yScale = chart.scales.y;
     if (!xScale || !yScale) return;
 
-    const xMin = xScale.min;
-    const xMax = xScale.max;
+    // Derive the intended X-axis window from state so the sun lines always
+    // span the full requested period even when data is sparse or absent.
+    let xMin, xMax;
+    if (state.chartDate) {
+      // Specific UTC day selected
+      const dayStart = new Date(state.chartDate + 'T00:00:00Z');
+      xMin = dayStart.getTime();
+      xMax = xMin + 24 * 3600 * 1000;
+    } else {
+      xMax = Date.now();
+      xMin = xMax - state.historyHours * 3600 * 1000;
+    }
+    // If the chart is zoomed, honour the zoomed range instead
+    if (state.zoomedXMin != null) xMin = state.zoomedXMin;
+    if (state.zoomedXMax != null) xMax = state.zoomedXMax;
+
     const sunTimes = getMidpointSunTimes(xMin, xMax);
     if (!sunTimes.length) return;
 
@@ -924,37 +941,31 @@ const sunLinePlugin = {
     sunTimes.forEach(({ sunrise, sunset }) => {
       // Sunrise — golden/amber line
       const srX = xScale.getPixelForValue(sunrise.getTime());
-      if (srX >= xScale.left && srX <= xScale.right) {
-        ctx.strokeStyle = 'rgba(255, 200, 60, 0.55)';
-        ctx.lineWidth = 1.5;
-        ctx.setLineDash([4, 3]);
-        ctx.beginPath();
-        ctx.moveTo(srX, yScale.top);
-        ctx.lineTo(srX, yScale.bottom);
-        ctx.stroke();
-        // Label
-        ctx.fillStyle = 'rgba(255, 200, 60, 0.75)';
-        ctx.font = '9px sans-serif';
-        ctx.textAlign = 'center';
-        ctx.fillText('☀ rise', srX, yScale.top + 9);
-      }
+      ctx.strokeStyle = 'rgba(255, 200, 60, 0.55)';
+      ctx.lineWidth = 1.5;
+      ctx.setLineDash([4, 3]);
+      ctx.beginPath();
+      ctx.moveTo(srX, yScale.top);
+      ctx.lineTo(srX, yScale.bottom);
+      ctx.stroke();
+      ctx.fillStyle = 'rgba(255, 200, 60, 0.75)';
+      ctx.font = '9px sans-serif';
+      ctx.textAlign = 'center';
+      ctx.fillText('☀ rise', srX, yScale.top + 9);
 
       // Sunset — orange/red line
       const ssX = xScale.getPixelForValue(sunset.getTime());
-      if (ssX >= xScale.left && ssX <= xScale.right) {
-        ctx.strokeStyle = 'rgba(255, 120, 40, 0.55)';
-        ctx.lineWidth = 1.5;
-        ctx.setLineDash([4, 3]);
-        ctx.beginPath();
-        ctx.moveTo(ssX, yScale.top);
-        ctx.lineTo(ssX, yScale.bottom);
-        ctx.stroke();
-        // Label
-        ctx.fillStyle = 'rgba(255, 120, 40, 0.75)';
-        ctx.font = '9px sans-serif';
-        ctx.textAlign = 'center';
-        ctx.fillText('☀ set', ssX, yScale.top + 9);
-      }
+      ctx.strokeStyle = 'rgba(255, 120, 40, 0.55)';
+      ctx.lineWidth = 1.5;
+      ctx.setLineDash([4, 3]);
+      ctx.beginPath();
+      ctx.moveTo(ssX, yScale.top);
+      ctx.lineTo(ssX, yScale.bottom);
+      ctx.stroke();
+      ctx.fillStyle = 'rgba(255, 120, 40, 0.75)';
+      ctx.font = '9px sans-serif';
+      ctx.textAlign = 'center';
+      ctx.fillText('☀ set', ssX, yScale.top + 9);
     });
 
     ctx.setLineDash([]);
