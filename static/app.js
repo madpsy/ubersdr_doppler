@@ -854,6 +854,115 @@ function xAxisConfig(showTitle) {
   };
 }
 
+// ---------------------------------------------------------------------------
+// Midpoint sun times helper
+//
+// Returns an array of {sunrise: Date, sunset: Date} objects — one per UTC
+// calendar day that falls within the current chart X-axis range — computed
+// at the geographic midpoint between the receiver and the first station that
+// has a grid square configured.  Returns [] when the prerequisite data is
+// not yet available.
+// ---------------------------------------------------------------------------
+function getMidpointSunTimes(xMin, xMax) {
+  if (!state.showMidpointSun) return [];
+  if (typeof SunCalc === 'undefined') return [];
+
+  // Receiver position
+  const rxGrid = state.receiverGrid;
+  if (!rxGrid) return [];
+  const rxPos = maidenheadToLatLon(rxGrid);
+  if (!rxPos) return [];
+
+  // First non-reference station with a grid square
+  const txStation = state.stations.find(s => s.config && s.config.grid && !s.config.is_reference);
+  if (!txStation) return [];
+  const txPos = maidenheadToLatLon(txStation.config.grid);
+  if (!txPos) return [];
+
+  // Geographic midpoint
+  const midLat = (rxPos.lat + txPos.lat) / 2;
+  const midLon = (rxPos.lon + txPos.lon) / 2;
+
+  // Iterate over each UTC calendar day in [xMin, xMax]
+  const results = [];
+  const startDay = new Date(xMin);
+  startDay.setUTCHours(0, 0, 0, 0);
+  const endMs = xMax;
+
+  for (let d = new Date(startDay); d.getTime() <= endMs; d.setUTCDate(d.getUTCDate() + 1)) {
+    const times = SunCalc.getTimes(new Date(d), midLat, midLon);
+    if (times.sunrise && times.sunset &&
+        isFinite(times.sunrise.getTime()) && isFinite(times.sunset.getTime())) {
+      results.push({ sunrise: times.sunrise, sunset: times.sunset });
+    }
+  }
+  return results;
+}
+
+// ---------------------------------------------------------------------------
+// Chart.js plugin — midpoint sunrise/sunset vertical lines
+// ---------------------------------------------------------------------------
+const sunLinePlugin = {
+  id: 'sunLine',
+  afterDraw(chart) {
+    if (!state.showMidpointSun) return;
+    const xScale = chart.scales.x;
+    const yScale = chart.scales.y;
+    if (!xScale || !yScale) return;
+
+    const xMin = xScale.min;
+    const xMax = xScale.max;
+    const sunTimes = getMidpointSunTimes(xMin, xMax);
+    if (!sunTimes.length) return;
+
+    const ctx = chart.ctx;
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(xScale.left, yScale.top, xScale.right - xScale.left, yScale.bottom - yScale.top);
+    ctx.clip();
+
+    sunTimes.forEach(({ sunrise, sunset }) => {
+      // Sunrise — golden/amber line
+      const srX = xScale.getPixelForValue(sunrise.getTime());
+      if (srX >= xScale.left && srX <= xScale.right) {
+        ctx.strokeStyle = 'rgba(255, 200, 60, 0.55)';
+        ctx.lineWidth = 1.5;
+        ctx.setLineDash([4, 3]);
+        ctx.beginPath();
+        ctx.moveTo(srX, yScale.top);
+        ctx.lineTo(srX, yScale.bottom);
+        ctx.stroke();
+        // Label
+        ctx.fillStyle = 'rgba(255, 200, 60, 0.75)';
+        ctx.font = '9px sans-serif';
+        ctx.textAlign = 'center';
+        ctx.fillText('☀ rise', srX, yScale.top + 9);
+      }
+
+      // Sunset — orange/red line
+      const ssX = xScale.getPixelForValue(sunset.getTime());
+      if (ssX >= xScale.left && ssX <= xScale.right) {
+        ctx.strokeStyle = 'rgba(255, 120, 40, 0.55)';
+        ctx.lineWidth = 1.5;
+        ctx.setLineDash([4, 3]);
+        ctx.beginPath();
+        ctx.moveTo(ssX, yScale.top);
+        ctx.lineTo(ssX, yScale.bottom);
+        ctx.stroke();
+        // Label
+        ctx.fillStyle = 'rgba(255, 120, 40, 0.75)';
+        ctx.font = '9px sans-serif';
+        ctx.textAlign = 'center';
+        ctx.fillText('☀ set', ssX, yScale.top + 9);
+      }
+    });
+
+    ctx.setLineDash([]);
+    ctx.restore();
+  },
+};
+
+// ---------------------------------------------------------------------------
 function initCharts() {
   // ── Panel 1: Doppler / absolute frequency ─────────────────────────────────
   const dCtx = document.getElementById('doppler-chart').getContext('2d');
@@ -1748,114 +1857,6 @@ function startHistoryRefreshTicker() {
     }
   }, 60 * 1000);
 }
-
-// ---------------------------------------------------------------------------
-// Midpoint sun times helper
-//
-// Returns an array of {sunrise: Date, sunset: Date} objects — one per UTC
-// calendar day that falls within the current chart X-axis range — computed
-// at the geographic midpoint between the receiver and the first station that
-// has a grid square configured.  Returns [] when the prerequisite data is
-// not yet available.
-// ---------------------------------------------------------------------------
-function getMidpointSunTimes(xMin, xMax) {
-  if (!state.showMidpointSun) return [];
-  if (typeof SunCalc === 'undefined') return [];
-
-  // Receiver position
-  const rxGrid = state.receiverGrid;
-  if (!rxGrid) return [];
-  const rxPos = maidenheadToLatLon(rxGrid);
-  if (!rxPos) return [];
-
-  // First non-reference station with a grid square
-  const txStation = state.stations.find(s => s.config && s.config.grid && !s.config.is_reference);
-  if (!txStation) return [];
-  const txPos = maidenheadToLatLon(txStation.config.grid);
-  if (!txPos) return [];
-
-  // Geographic midpoint
-  const midLat = (rxPos.lat + txPos.lat) / 2;
-  const midLon = (rxPos.lon + txPos.lon) / 2;
-
-  // Iterate over each UTC calendar day in [xMin, xMax]
-  const results = [];
-  const startDay = new Date(xMin);
-  startDay.setUTCHours(0, 0, 0, 0);
-  const endMs = xMax;
-
-  for (let d = new Date(startDay); d.getTime() <= endMs; d.setUTCDate(d.getUTCDate() + 1)) {
-    const times = SunCalc.getTimes(new Date(d), midLat, midLon);
-    if (times.sunrise && times.sunset &&
-        isFinite(times.sunrise.getTime()) && isFinite(times.sunset.getTime())) {
-      results.push({ sunrise: times.sunrise, sunset: times.sunset });
-    }
-  }
-  return results;
-}
-
-// ---------------------------------------------------------------------------
-// Chart.js plugin — midpoint sunrise/sunset vertical lines
-// ---------------------------------------------------------------------------
-const sunLinePlugin = {
-  id: 'sunLine',
-  afterDraw(chart) {
-    if (!state.showMidpointSun) return;
-    const xScale = chart.scales.x;
-    const yScale = chart.scales.y;
-    if (!xScale || !yScale) return;
-
-    const xMin = xScale.min;
-    const xMax = xScale.max;
-    const sunTimes = getMidpointSunTimes(xMin, xMax);
-    if (!sunTimes.length) return;
-
-    const ctx = chart.ctx;
-    ctx.save();
-    ctx.beginPath();
-    ctx.rect(xScale.left, yScale.top, xScale.right - xScale.left, yScale.bottom - yScale.top);
-    ctx.clip();
-
-    sunTimes.forEach(({ sunrise, sunset }) => {
-      // Sunrise — golden/amber line
-      const srX = xScale.getPixelForValue(sunrise.getTime());
-      if (srX >= xScale.left && srX <= xScale.right) {
-        ctx.strokeStyle = 'rgba(255, 200, 60, 0.55)';
-        ctx.lineWidth = 1.5;
-        ctx.setLineDash([4, 3]);
-        ctx.beginPath();
-        ctx.moveTo(srX, yScale.top);
-        ctx.lineTo(srX, yScale.bottom);
-        ctx.stroke();
-        // Label
-        ctx.fillStyle = 'rgba(255, 200, 60, 0.75)';
-        ctx.font = '9px sans-serif';
-        ctx.textAlign = 'center';
-        ctx.fillText('☀ rise', srX, yScale.top + 9);
-      }
-
-      // Sunset — orange/red line
-      const ssX = xScale.getPixelForValue(sunset.getTime());
-      if (ssX >= xScale.left && ssX <= xScale.right) {
-        ctx.strokeStyle = 'rgba(255, 120, 40, 0.55)';
-        ctx.lineWidth = 1.5;
-        ctx.setLineDash([4, 3]);
-        ctx.beginPath();
-        ctx.moveTo(ssX, yScale.top);
-        ctx.lineTo(ssX, yScale.bottom);
-        ctx.stroke();
-        // Label
-        ctx.fillStyle = 'rgba(255, 120, 40, 0.75)';
-        ctx.font = '9px sans-serif';
-        ctx.textAlign = 'center';
-        ctx.fillText('☀ set', ssX, yScale.top + 9);
-      }
-    });
-
-    ctx.setLineDash([]);
-    ctx.restore();
-  },
-};
 
 // ---------------------------------------------------------------------------
 // Chart.js plugin — "signal lost" gap annotations
