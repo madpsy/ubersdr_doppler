@@ -966,7 +966,12 @@ function attachChartZoomHandlers(canvas, chart) {
     const xScale = chart.scales.x;
     if (!xScale) return;
 
-    // Current visible range (fall back to full data range)
+    const zoomingOut = e.deltaY > 0;
+
+    // If not currently zoomed in, scrolling out does nothing
+    if (zoomingOut && state.zoomedXMin === null) return;
+
+    // Current visible range (fall back to full data range when not zoomed)
     const curMin = state.zoomedXMin ?? xScale.min;
     const curMax = state.zoomedXMax ?? xScale.max;
     const range  = curMax - curMin;
@@ -977,24 +982,26 @@ function attachChartZoomHandlers(canvas, chart) {
     const frac = Math.max(0, Math.min(1,
       (e.clientX - rect.left - xScale.left) / (xScale.right - xScale.left)));
 
-    const factor = e.deltaY < 0 ? 0.7 : 1.4;   // scroll up = zoom in
+    const factor = zoomingOut ? 1.4 : 0.7;   // scroll up = zoom in, down = zoom out
     const newRange = range * factor;
+
+    // Clamp to the full data extent
+    const dataMin = xScale.min;
+    const dataMax = xScale.max;
+    const fullRange = dataMax - dataMin;
+
+    // If zooming out to (or beyond) the full range, just reset
+    if (newRange >= fullRange * 0.999) {
+      resetChartZoom();
+      return;
+    }
 
     // Keep the point under the cursor stationary
     let newMin = curMin + frac * (range - newRange);
     let newMax = newMin + newRange;
 
-    // Clamp to the full data extent
-    const dataMin = xScale.min;
-    const dataMax = xScale.max;
     if (newMin < dataMin) { newMin = dataMin; newMax = dataMin + newRange; }
     if (newMax > dataMax) { newMax = dataMax; newMin = dataMax - newRange; }
-
-    // If we've zoomed back out to (or beyond) the full range, just reset
-    if (newRange >= (dataMax - dataMin) * 0.999) {
-      resetChartZoom();
-      return;
-    }
 
     state.zoomedXMin = newMin;
     state.zoomedXMax = newMax;
