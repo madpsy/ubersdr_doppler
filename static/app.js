@@ -46,7 +46,8 @@ const state = {
   // Per-station wall-clock time of the last SSE message received from the backend.
   // Used to detect backend→UberSDR connection staleness independently of reading.valid.
   lastServerTime: {},    // label → Date
-  receiverGrid: null,    // Maidenhead locator from /api/description (receiver position)
+  receiverGrid: null,      // Maidenhead locator from /api/description (receiver position)
+  receiverCallsign: null,  // Callsign from /api/description
 };
 
 // Staleness threshold: if no SSE message has arrived for a station in this many
@@ -149,6 +150,7 @@ async function fetchSDRDescription() {
     const callsign  = d.receiver && d.receiver.callsign  ? d.receiver.callsign  : null;
     const maidenhead = d.receiver && d.receiver.gps && d.receiver.gps.maidenhead
       ? d.receiver.gps.maidenhead : null;
+    if (callsign)   state.receiverCallsign = callsign;
     if (maidenhead) {
       state.receiverGrid = maidenhead;
       updateSpecGridBadges(); // update any already-rendered spectrum panels
@@ -1139,6 +1141,7 @@ function initCharts() {
       responsive: true,
       maintainAspectRatio: false,
       interaction: { mode: 'index', intersect: false },
+      layout: { padding: { top: 36 } },
       scales: {
         x: xAxisConfig(false),
         y: {

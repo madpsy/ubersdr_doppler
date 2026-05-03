@@ -126,17 +126,27 @@ window.DopplerMap = (() => {
     const pos = maidenheadToLatLon(rxGrid);
     if (!pos) return;
 
+    const callsign = (typeof state !== 'undefined' && state.receiverCallsign)
+      ? state.receiverCallsign : '';
+    const titleText = callsign ? `📡 ${callsign}` : '📡 Receiver';
+    const callsignRow = callsign
+      ? `<div class="map-popup-row"><span class="map-popup-label">Callsign</span><span>${callsign}</span></div>`
+      : '';
+
+    const popupHtml = `
+      <div class="map-popup">
+        <div class="map-popup-title" style="color:#f0c040">${titleText}</div>
+        ${callsignRow}
+        <div class="map-popup-row"><span class="map-popup-label">Grid</span><span>${rxGrid}</span></div>
+        <div class="map-popup-row"><span class="map-popup-label">Lat/Lon</span><span>${pos.lat.toFixed(3)}°, ${pos.lon.toFixed(3)}°</span></div>
+      </div>`;
+
     if (rxMarker) {
       rxMarker.setLatLng([pos.lat, pos.lon]);
+      rxMarker.setPopupContent(popupHtml);
     } else {
       rxMarker = L.marker([pos.lat, pos.lon], { icon: rxIcon(), zIndexOffset: 1000 })
-        .bindPopup(`
-          <div class="map-popup">
-            <div class="map-popup-title">📡 Receiver</div>
-            <div class="map-popup-row"><span class="map-popup-label">Grid</span><span>${rxGrid}</span></div>
-            <div class="map-popup-row"><span class="map-popup-label">Lat/Lon</span><span>${pos.lat.toFixed(3)}°, ${pos.lon.toFixed(3)}°</span></div>
-          </div>
-        `, { maxWidth: 220 })
+        .bindPopup(popupHtml, { maxWidth: 240 })
         .addTo(map);
     }
   }
