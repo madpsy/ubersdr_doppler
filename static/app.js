@@ -923,7 +923,7 @@ function greatCirclePoint(a, b, t) {
  */
 function estimateHopCount(distKm, freqHz) {
   const R = 6371; // Earth radius km
-  const elMin = 3 * Math.PI / 180; // minimum elevation in radians
+  const elMin = 3 * Math.PI / 180; // minimum elevation in radians (3°)
 
   let hv; // virtual reflection height (km)
   if (freqHz < 5e6)       hv = 200;
@@ -931,9 +931,20 @@ function estimateHopCount(distKm, freqHz) {
   else if (freqHz < 20e6) hv = 350;
   else                    hv = 400;
 
-  // Half-hop slant range from geometry: ray from ground at elMin to height hv
-  // Ground range of one hop = 2 * R * (arccos(R*cos(elMin)/(R+hv)) - elMin)
-  const maxHopKm = 2 * R * (Math.acos(R * Math.cos(elMin) / (R + hv)) - elMin);
+  // Ground range of one F-layer hop for a ray leaving at elevation angle elMin:
+  //
+  //   The ray travels from ground (radius R) to the reflection height (radius R+hv).
+  //   By the sine rule in the triangle (Earth centre, TX, reflection point):
+  //     sin(90° + elMin) / (R + hv) = sin(α) / R
+  //   where α is the angle at the reflection point.
+  //   The central angle subtended by one half-hop:
+  //     θ_half = 90° - elMin - arcsin(R·cos(elMin)/(R+hv))
+  //   Full hop ground range:
+  //     maxHopKm = 2 * R * θ_half  (θ_half in radians)
+  //
+  const sinArg = R * Math.cos(elMin) / (R + hv);
+  const thetaHalf = Math.PI / 2 - elMin - Math.asin(sinArg);
+  const maxHopKm = 2 * R * thetaHalf;
 
   return Math.max(1, Math.ceil(distKm / maxHopKm));
 }
@@ -1025,7 +1036,6 @@ const sunLinePlugin = {
       const freqHz = s.config.freq_hz || 10e6;
       const distKm = haversineKm(rxPos, txPos);
       const N = estimateHopCount(distKm, freqHz);
-      console.log(`[sunLine] ${s.config.label}: rx=${JSON.stringify(rxPos)} tx=${JSON.stringify(txPos)} dist=${distKm.toFixed(0)}km freq=${(freqHz/1e6).toFixed(3)}MHz hops=${N}`);
       const reflPoints = hopReflectionPoints(rxPos, txPos, freqHz);
       const stationColour = colourForIndex(stationIdx);
 
@@ -1035,9 +1045,13 @@ const sunLinePlugin = {
         const srLabel = `☀↑ ${s.config.label}${hopLabel}`;
         const ssLabel = `☀↓ ${s.config.label}${hopLabel}`;
 
+        console.log(`[sunLine] ${s.config.label} hop${hopIndex}/${totalHops} lat=${lat.toFixed(2)} lon=${lon.toFixed(2)} dist=${distKm.toFixed(0)}km hops=${N} xMin=${new Date(xMin).toISOString()} xMax=${new Date(xMax).toISOString()}`);
         times.forEach(({ sunrise, sunset }) => {
           const srX = xScale.getPixelForValue(sunrise.getTime());
-          if (srX >= xScale.left && srX <= xScale.right) {
+          const ssX = xScale.getPixelForValue(sunset.getTime());
+          const inWindow = t => t >= xScale.left && t <= xScale.right;
+          console.log(`  sunrise=${sunrise.toISOString()} x=${srX.toFixed(0)} inWindow=${inWindow(srX)} | sunset=${sunset.toISOString()} x=${ssX.toFixed(0)} inWindow=${inWindow(ssX)}`);
+          if (inWindow(srX)) {
             lines.push({
               x: srX,
               strokeStyle: stationColour + 'aa',
@@ -1046,8 +1060,7 @@ const sunLinePlugin = {
               label: srLabel,
             });
           }
-          const ssX = xScale.getPixelForValue(sunset.getTime());
-          if (ssX >= xScale.left && ssX <= xScale.right) {
+          if (inWindow(ssX)) {
             lines.push({
               x: ssX,
               strokeStyle: stationColour + '66',
