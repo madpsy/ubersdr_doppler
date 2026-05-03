@@ -154,6 +154,8 @@ async function fetchSDRDescription() {
       updateSpecGridBadges(); // update any already-rendered spectrum panels
       // Redraw doppler chart so sun lines appear now that receiver grid is known
       if (state.dopplerChart) state.dopplerChart.update('none');
+      // Update map with receiver position
+      if (typeof DopplerMap !== 'undefined') DopplerMap.update();
     }
     const el = document.getElementById('sdr-info');
     if (!el) return;
@@ -1968,6 +1970,7 @@ async function loadStations() {
   populateDownloadSelect();
   drawMiniSpectra();
   updateSpectrumHints();
+  if (typeof DopplerMap !== 'undefined') DopplerMap.update();
 }
 
 // Modal helpers

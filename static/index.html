@@ -5,10 +5,13 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>UberSDR Doppler Monitor</title>
   <link rel="stylesheet" href="style.css">
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" crossorigin=""/>
   <script>window.BASE_PATH = "{{.BasePath}}";</script>
   <script src="chart.umd.min.js"></script>
   <script src="chartjs-adapter-date-fns.bundle.min.js"></script>
   <script src="suncalc.js"></script>
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" crossorigin=""></script>
+  <script src="https://unpkg.com/leaflet-terminator@0.2.0/L.Terminator.js" crossorigin=""></script>
   <script src="audio-analysis.js"></script>
 </head>
 <body>
@@ -146,6 +149,7 @@
     <section id="chart-section">
       <div class="chart-header">
         <h2>Doppler Shift History</h2>
+        <button id="map-toggle-btn" class="btn btn-secondary btn-sm" onclick="DopplerMap.toggle(); this.classList.toggle('btn-active')" title="Show/hide propagation map">🗺 Map</button>
         <div class="chart-controls">
           <label>
             <select id="hours-select" title="View window">
@@ -204,6 +208,19 @@
       <p class="chart-hint" id="chart-zoom-hint" style="display:none">
         🔍 Zoomed — <a href="#" id="chart-zoom-reset" style="color:var(--blue)">reset zoom</a> · or double-click any chart
       </p>
+    </section>
+
+    <!-- Propagation Map -->
+    <section id="map-section" class="hidden">
+      <div class="chart-header">
+        <h2>🗺 Propagation Map</h2>
+        <div class="chart-controls">
+          <span class="chart-hint" style="margin:0">
+            Day/night terminator · great-circle paths · F-layer reflection points · click markers for details
+          </span>
+        </div>
+      </div>
+      <div id="doppler-map"></div>
     </section>
 
     <!-- Station management -->
@@ -368,5 +385,6 @@
   </main>
 
   <script src="app.js"></script>
+  <script src="map.js"></script>
 </body>
 </html>

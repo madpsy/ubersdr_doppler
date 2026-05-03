@@ -340,6 +340,139 @@ tr.row-stale td  { background: rgba(210,153,34,0.08); }
   cursor: crosshair;
 }
 
+/* ── Propagation Map ────────────────────────────────────────────────────── */
+#map-section {
+  margin-bottom: 24px;
+}
+
+#doppler-map {
+  height: 420px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  overflow: hidden;
+  background: #0a0e1a;
+}
+
+/* Active state for the map toggle button */
+.btn-active {
+  background: var(--accent) !important;
+  color: #000 !important;
+  border-color: var(--accent) !important;
+}
+
+/* Leaflet popup — dark theme */
+.leaflet-popup-content-wrapper {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  box-shadow: 0 4px 20px rgba(0,0,0,0.6);
+  color: var(--text);
+  padding: 0;
+}
+.leaflet-popup-content {
+  margin: 0;
+  font-size: 0.82rem;
+  line-height: 1.5;
+}
+.leaflet-popup-tip {
+  background: var(--surface);
+}
+.leaflet-popup-close-button {
+  color: var(--muted) !important;
+  font-size: 16px !important;
+  top: 6px !important;
+  right: 8px !important;
+}
+.leaflet-popup-close-button:hover {
+  color: var(--text) !important;
+}
+
+/* Popup content layout */
+.map-popup {
+  padding: 10px 14px 10px 12px;
+  min-width: 180px;
+}
+.map-popup-title {
+  font-weight: 700;
+  font-size: 0.88rem;
+  margin-bottom: 7px;
+  padding-bottom: 5px;
+  border-bottom: 1px solid var(--border);
+  color: var(--text);
+}
+.map-popup-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 2px 0;
+  color: var(--text);
+}
+.map-popup-label {
+  color: var(--muted);
+  flex-shrink: 0;
+}
+
+/* Map legend */
+.map-legend {
+  background: rgba(22, 27, 34, 0.92);
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  padding: 10px 13px;
+  font-size: 0.78rem;
+  color: var(--text);
+  line-height: 1.8;
+  backdrop-filter: blur(4px);
+}
+.map-legend-title {
+  font-weight: 700;
+  font-size: 0.8rem;
+  margin-bottom: 5px;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+.map-legend-row {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+.map-legend-row svg {
+  flex-shrink: 0;
+}
+
+/* UTC clock control */
+.map-clock {
+  background: rgba(22, 27, 34, 0.88);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 5px 10px;
+  font-size: 0.78rem;
+  font-family: monospace;
+  color: var(--accent);
+  letter-spacing: 0.04em;
+  backdrop-filter: blur(4px);
+}
+
+/* Leaflet attribution — dim to match dark theme */
+.leaflet-control-attribution {
+  background: rgba(13, 17, 23, 0.75) !important;
+  color: var(--muted) !important;
+  font-size: 0.68rem !important;
+}
+.leaflet-control-attribution a {
+  color: var(--accent) !important;
+}
+
+/* Leaflet zoom buttons — dark theme */
+.leaflet-control-zoom a {
+  background: var(--surface) !important;
+  color: var(--text) !important;
+  border-color: var(--border) !important;
+}
+.leaflet-control-zoom a:hover {
+  background: var(--border) !important;
+}
+
 /* ── Chart zoom / pan ──────────────────────────────────────────────────── */
 /* Crosshair cursor on all history chart canvases */
 #doppler-chart, #snr-chart, #power-chart {
