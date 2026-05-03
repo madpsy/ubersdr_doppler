@@ -1,7 +1,7 @@
 /* map.js — Leaflet-based propagation path map for UberSDR Doppler Monitor
  *
  * Displays:
- *   • Day/night terminator (Leaflet.Terminator, updated every 60 s)
+ *   • Day/night terminator (L.Terminator, updated every 60 s)
  *   • Receiver position (star marker)
  *   • Each non-reference station: transmitter marker + great-circle path
  *     + ionospheric reflection point markers (one per F-layer hop)
@@ -10,11 +10,10 @@
  * Public API (window.DopplerMap):
  *   init()           — create the map (called once on page load)
  *   update()         — redraw all station layers from current state
- *   show() / hide()  — toggle panel visibility
  *
  * Depends on:
  *   • Leaflet (global L)
- *   • Leaflet.Terminator (L.terminator)
+ *   • L.Terminator (loaded from L.Terminator.js — L.terminator factory)
  *   • SunCalc (global SunCalc)
  *   • app.js globals: state, colourForIndex, maidenheadToLatLon,
  *                     greatCirclePoint, hopReflectionPoints, haversineKm,
@@ -33,7 +32,7 @@ window.DopplerMap = (() => {
   let visible        = false;
   let initialised    = false;
 
-  // ── Colour helpers ──────────────────────────────────────────────────────────
+  // ── Colour constants ─────────────────────────────────────────────────────────
   const NIGHT_FILL   = 'rgba(0, 10, 40, 0.45)';
   const NIGHT_STROKE = 'rgba(80, 140, 255, 0.6)';
 
@@ -97,68 +96,28 @@ window.DopplerMap = (() => {
     return pts;
   }
 
-  // ── Terminator (self-contained, uses SunCalc) ───────────────────────────────
+  // ── Terminator (L.Terminator.js — L.Polygon subclass) ──────────────────────
   //
-  // Builds a GeoJSON polygon covering the night side of the Earth.
-  // Algorithm: for each longitude step, find the latitude where the sun's
-  // altitude is exactly 0° (the terminator).  Then close the polygon by
-  // wrapping around the pole on the night side.
+  // Uses the bundled L.Terminator plugin which computes the day/night boundary
+  // using proper solar position mathematics and renders it as a smooth
+  // L.Polygon (Leaflet handles the curved rendering correctly).
   //
-  function terminatorGeoJSON(date) {
-    const steps = 360;
-    const coords = [];
-
-    for (let i = 0; i <= steps; i++) {
-      const lon = -180 + (360 * i / steps);
-      // Binary-search for the latitude where sun altitude = 0 at this longitude
-      let lo = -90, hi = 90;
-      for (let iter = 0; iter < 32; iter++) {
-        const mid = (lo + hi) / 2;
-        const alt = SunCalc.getPosition(date, mid, lon).altitude;
-        if (alt > 0) lo = mid; else hi = mid;
-      }
-      coords.push([lon, (lo + hi) / 2]);
-    }
-
-    // Determine which pole is in night (sun altitude at north pole)
-    const northAlt = SunCalc.getPosition(date, 90, 0).altitude;
-    const nightPole = northAlt < 0 ? 90 : -90;
-
-    // Close the polygon: go around the night pole
-    const ring = [
-      ...coords,
-      [180, nightPole],
-      [-180, nightPole],
-      coords[0],
-    ];
-
-    return {
-      type: 'Feature',
-      geometry: { type: 'Polygon', coordinates: [ring] },
-      properties: {},
-    };
-  }
-
   function addTerminator() {
-    const geojson = terminatorGeoJSON(new Date());
-    terminator = L.geoJSON(geojson, {
-      style: {
-        fillColor:   NIGHT_FILL,
-        fillOpacity: 1,
-        color:       NIGHT_STROKE,
-        weight:      1.5,
-        opacity:     0.9,
-        dashArray:   '4 3',
-      },
+    terminator = L.terminator({
+      fillColor:   NIGHT_FILL,
+      fillOpacity: 0.45,
+      color:       NIGHT_STROKE,
+      weight:      1.5,
+      opacity:     0.9,
+      dashArray:   '4 3',
       interactive: false,
+      resolution:  2,
     }).addTo(map);
   }
 
   function refreshTerminator() {
     if (!terminator) return;
-    const geojson = terminatorGeoJSON(new Date());
-    terminator.clearLayers();
-    terminator.addData(geojson);
+    terminator.setTime(new Date());
   }
 
   // ── Receiver marker ─────────────────────────────────────────────────────────
