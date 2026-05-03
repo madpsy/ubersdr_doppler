@@ -1033,7 +1033,12 @@ function initCharts() {
         tooltip: {
           filter: item => !item.dataset._isBand,
           callbacks: {
-            title: items => items.length ? new Date(items[0].parsed.x).toISOString().slice(11, 19) + ' UTC' : '',
+            title: items => {
+              if (!items.length) return '';
+              const raw = items[0].raw;
+              const ts = (raw && raw.x) ? raw.x : new Date(items[0].parsed.x);
+              return new Date(ts).toISOString().slice(11, 19) + ' UTC';
+            },
             label: ctx => {
               // Skip band datasets in tooltip
               if (ctx.dataset._isBand) return null;
@@ -1116,7 +1121,12 @@ function initCharts() {
         legend: { display: false },
         tooltip: {
           callbacks: {
-            title: items => items.length ? new Date(items[0].parsed.x).toISOString().slice(11, 19) + ' UTC' : '',
+            title: items => {
+              if (!items.length) return '';
+              const raw = items[0].raw;
+              const ts = (raw && raw.x) ? raw.x : new Date(items[0].parsed.x);
+              return new Date(ts).toISOString().slice(11, 19) + ' UTC';
+            },
             label: ctx => `${ctx.dataset.label} SNR: ${ctx.parsed.y.toFixed(1)} dB`,
           },
         },
@@ -1146,7 +1156,12 @@ function initCharts() {
         legend: { display: false },
         tooltip: {
           callbacks: {
-            title: items => items.length ? new Date(items[0].parsed.x).toISOString().slice(11, 19) + ' UTC' : '',
+            title: items => {
+              if (!items.length) return '';
+              const raw = items[0].raw;
+              const ts = (raw && raw.x) ? raw.x : new Date(items[0].parsed.x);
+              return new Date(ts).toISOString().slice(11, 19) + ' UTC';
+            },
             label: ctx => `${ctx.dataset.label}: ${ctx.parsed.y.toFixed(1)} dBFS`,
           },
         },
