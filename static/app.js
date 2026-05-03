@@ -846,6 +846,7 @@ function xAxisConfig(showTitle) {
       displayFormats: { minute: 'HH:mm', hour: 'HH:mm' },
       tooltipFormat: 'HH:mm:ss',
     },
+    adapters: { date: { timeZone: 'UTC' } },
     ticks: { color: '#8b949e', maxTicksLimit: 10, source: 'auto' },
     grid: { color: '#21262d' },
     title: showTitle
