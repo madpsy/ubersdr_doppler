@@ -1703,7 +1703,7 @@ function connectSSE() {
           const canvasId = `spec-canvas-${station.replace(/[^a-zA-Z0-9]/g, '_')}`;
           drawMiniSpectrum(canvasId, s, i);
         }
-        appendLivePoint(station, reading);
+        if (s) appendLivePoint(station, reading);
         // Feed live reading into the audio analysis modal if it's open for this station
         if (typeof AudioAnalysisModal !== 'undefined' &&
             AudioAnalysisModal.isOpen() &&
