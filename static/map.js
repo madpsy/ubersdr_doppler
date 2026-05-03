@@ -97,23 +97,68 @@ window.DopplerMap = (() => {
     return pts;
   }
 
-  // ── Terminator ──────────────────────────────────────────────────────────────
+  // ── Terminator (self-contained, uses SunCalc) ───────────────────────────────
+  //
+  // Builds a GeoJSON polygon covering the night side of the Earth.
+  // Algorithm: for each longitude step, find the latitude where the sun's
+  // altitude is exactly 0° (the terminator).  Then close the polygon by
+  // wrapping around the pole on the night side.
+  //
+  function terminatorGeoJSON(date) {
+    const steps = 360;
+    const coords = [];
+
+    for (let i = 0; i <= steps; i++) {
+      const lon = -180 + (360 * i / steps);
+      // Binary-search for the latitude where sun altitude = 0 at this longitude
+      let lo = -90, hi = 90;
+      for (let iter = 0; iter < 32; iter++) {
+        const mid = (lo + hi) / 2;
+        const alt = SunCalc.getPosition(date, mid, lon).altitude;
+        if (alt > 0) lo = mid; else hi = mid;
+      }
+      coords.push([lon, (lo + hi) / 2]);
+    }
+
+    // Determine which pole is in night (sun altitude at north pole)
+    const northAlt = SunCalc.getPosition(date, 90, 0).altitude;
+    const nightPole = northAlt < 0 ? 90 : -90;
+
+    // Close the polygon: go around the night pole
+    const ring = [
+      ...coords,
+      [180, nightPole],
+      [-180, nightPole],
+      coords[0],
+    ];
+
+    return {
+      type: 'Feature',
+      geometry: { type: 'Polygon', coordinates: [ring] },
+      properties: {},
+    };
+  }
+
   function addTerminator() {
-    if (!L.terminator) return;
-    terminator = L.terminator({
-      fillColor:   NIGHT_FILL,
-      fillOpacity: 1,
-      color:       NIGHT_STROKE,
-      weight:      1.5,
-      opacity:     0.9,
-      dashArray:   '4 3',
+    const geojson = terminatorGeoJSON(new Date());
+    terminator = L.geoJSON(geojson, {
+      style: {
+        fillColor:   NIGHT_FILL,
+        fillOpacity: 1,
+        color:       NIGHT_STROKE,
+        weight:      1.5,
+        opacity:     0.9,
+        dashArray:   '4 3',
+      },
+      interactive: false,
     }).addTo(map);
   }
 
   function refreshTerminator() {
-    if (terminator && terminator.setTime) {
-      terminator.setTime();
-    }
+    if (!terminator) return;
+    const geojson = terminatorGeoJSON(new Date());
+    terminator.clearLayers();
+    terminator.addData(geojson);
   }
 
   // ── Receiver marker ─────────────────────────────────────────────────────────
@@ -250,7 +295,7 @@ window.DopplerMap = (() => {
 
   // ── UTC clock control ───────────────────────────────────────────────────────
   function buildClock() {
-    const clock = L.control({ position: 'topleft' });
+    const clock = L.control({ position: 'topright' });
     clock.onAdd = () => {
       const div = L.DomUtil.create('div', 'map-clock');
       div.id = 'map-utc-clock';
@@ -269,11 +314,62 @@ window.DopplerMap = (() => {
     setInterval(tick, 1000);
   }
 
+  // ── Frequency readout control ───────────────────────────────────────────────
+  let freqControl = null;
+
+  function buildFreqReadout() {
+    freqControl = L.control({ position: 'bottomleft' });
+    freqControl.onAdd = () => {
+      const div = L.DomUtil.create('div', 'map-freq-readout');
+      div.id = 'map-freq-readout';
+      return div;
+    };
+    freqControl.addTo(map);
+  }
+
+  function updateFreqReadout() {
+    const el = document.getElementById('map-freq-readout');
+    if (!el) return;
+    const stations = (typeof state !== 'undefined') ? state.stations : [];
+    if (!stations.length) { el.innerHTML = ''; return; }
+
+    const rows = stations
+      .filter(s => s.config && !s.config.is_reference)
+      .map((s, idx) => {
+        const colour = colourForIndex(idx);
+        const label  = s.config.label;
+        const nomHz  = s.config.freq_hz || 0;
+        const cur    = s.current;
+        let freqStr  = '—';
+        let doppStr  = '';
+        if (cur && cur.valid) {
+          // Prefer corrected Doppler; fall back to raw
+          const dHz = (cur.corrected_doppler_hz !== null && cur.corrected_doppler_hz !== undefined)
+            ? cur.corrected_doppler_hz : cur.doppler_hz;
+          const absHz = nomHz + dHz;
+          freqStr = absHz.toFixed(3) + ' Hz';
+          const sign = dHz >= 0 ? '+' : '';
+          doppStr = `<span class="map-freq-doppler">${sign}${dHz.toFixed(3)} Hz</span>`;
+        }
+        return `<div class="map-freq-row">
+          <span class="map-freq-dot" style="background:${colour}"></span>
+          <span class="map-freq-label">${label}</span>
+          <span class="map-freq-value">${freqStr}</span>
+          ${doppStr}
+        </div>`;
+      });
+
+    el.innerHTML = rows.length
+      ? `<div class="map-freq-title">Received frequency</div>${rows.join('')}`
+      : '';
+  }
+
   // ── Public API ──────────────────────────────────────────────────────────────
 
   function init() {
     if (initialised) return;
     initialised = true;
+    visible = true;
 
     map = L.map('doppler-map', {
       center: [30, -40],
@@ -294,6 +390,7 @@ window.DopplerMap = (() => {
     addTerminator();
     buildLegend();
     buildClock();
+    buildFreqReadout();
 
     // Refresh terminator every 60 s
     terminatorTimer = setInterval(() => {
@@ -301,6 +398,9 @@ window.DopplerMap = (() => {
       // Also refresh reflection point day/night status
       update();
     }, 60 * 1000);
+
+    // Invalidate size after a short delay to handle any layout reflow
+    setTimeout(() => { if (map) map.invalidateSize(); }, 100);
   }
 
   function update() {
@@ -312,31 +412,8 @@ window.DopplerMap = (() => {
     clearStationLayers();
     buildStationLayers(stations, rxGrid);
     refreshTerminator();
+    updateFreqReadout();
   }
 
-  function show() {
-    const panel = document.getElementById('map-section');
-    if (panel) panel.classList.remove('hidden');
-    visible = true;
-    if (!initialised) init();
-    // Leaflet needs a size invalidation after becoming visible
-    setTimeout(() => {
-      if (map) map.invalidateSize();
-      update();
-    }, 50);
-  }
-
-  function hide() {
-    const panel = document.getElementById('map-section');
-    if (panel) panel.classList.add('hidden');
-    visible = false;
-  }
-
-  function toggle() {
-    visible ? hide() : show();
-  }
-
-  function isVisible() { return visible; }
-
-  return { init, update, show, hide, toggle, isVisible };
+  return { init, update, updateFreqReadout };
 })();

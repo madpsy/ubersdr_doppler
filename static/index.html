@@ -11,7 +11,6 @@
   <script src="chartjs-adapter-date-fns.bundle.min.js"></script>
   <script src="suncalc.js"></script>
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" crossorigin=""></script>
-  <script src="https://unpkg.com/leaflet-terminator@0.2.0/L.Terminator.js" crossorigin=""></script>
   <script src="audio-analysis.js"></script>
 </head>
 <body>
@@ -149,7 +148,6 @@
     <section id="chart-section">
       <div class="chart-header">
         <h2>Doppler Shift History</h2>
-        <button id="map-toggle-btn" class="btn btn-secondary btn-sm" onclick="DopplerMap.toggle(); this.classList.toggle('btn-active')" title="Show/hide propagation map">🗺 Map</button>
         <div class="chart-controls">
           <label>
             <select id="hours-select" title="View window">
@@ -211,7 +209,7 @@
     </section>
 
     <!-- Propagation Map -->
-    <section id="map-section" class="hidden">
+    <section id="map-section">
       <div class="chart-header">
         <h2>🗺 Propagation Map</h2>
         <div class="chart-controls">

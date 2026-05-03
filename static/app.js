@@ -1875,6 +1875,7 @@ function connectSSE() {
             s.corrected_doppler_hz = reading.corrected_doppler_hz;
           }
           renderStatusTable();
+          if (typeof DopplerMap !== 'undefined') DopplerMap.updateFreqReadout();
           // Redraw mini spectrum with current reading info (uses cached spectrum_data)
           const i = state.stations.indexOf(s);
           const canvasId = `spec-canvas-${station.replace(/[^a-zA-Z0-9]/g, '_')}`;
@@ -2160,6 +2161,7 @@ async function applySpecInterval(intervalS) {
 
 document.addEventListener('DOMContentLoaded', async () => {
   initCharts();
+  if (typeof DopplerMap !== 'undefined') DopplerMap.init();
 
   // Attach zoom/pan handlers to all three chart canvases.
   // Scroll-wheel and drag-box zoom are wired to the doppler chart;
