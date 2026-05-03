@@ -292,31 +292,33 @@ window.DopplerMap = (() => {
     const stations = (typeof state !== 'undefined') ? state.stations : [];
     if (!stations.length) { el.innerHTML = ''; return; }
 
-    const rows = stations
-      .filter(s => s.config && !s.config.is_reference)
-      .map((s, idx) => {
-        const colour = colourForIndex(idx);
-        const label  = s.config.label;
-        const nomHz  = s.config.freq_hz || 0;
-        const cur    = s.current;
-        let freqStr  = '—';
-        let doppStr  = '';
-        if (cur && cur.valid) {
-          // Prefer corrected Doppler; fall back to raw
-          const dHz = (cur.corrected_doppler_hz !== null && cur.corrected_doppler_hz !== undefined)
-            ? cur.corrected_doppler_hz : cur.doppler_hz;
-          const absHz = nomHz + dHz;
-          freqStr = absHz.toFixed(3) + ' Hz';
-          const sign = dHz >= 0 ? '+' : '';
-          doppStr = `<span class="map-freq-doppler">${sign}${dHz.toFixed(3)} Hz</span>`;
-        }
-        return `<div class="map-freq-row">
-          <span class="map-freq-dot" style="background:${colour}"></span>
-          <span class="map-freq-label">${label}</span>
-          <span class="map-freq-value">${freqStr}</span>
-          ${doppStr}
-        </div>`;
-      });
+    // Use the original station index (not a filtered index) so colours match
+    // the chart/table/map markers which all call colourForIndex(originalIdx).
+    const rows = [];
+    stations.forEach((s, idx) => {
+      if (!s.config || s.config.is_reference) return;
+      const colour = colourForIndex(idx);
+      const label  = s.config.label;
+      const nomHz  = s.config.freq_hz || 0;
+      const cur    = s.current;
+      let freqStr  = '—';
+      let doppStr  = '';
+      if (cur && cur.valid) {
+        // Prefer corrected Doppler; fall back to raw
+        const dHz = (cur.corrected_doppler_hz !== null && cur.corrected_doppler_hz !== undefined)
+          ? cur.corrected_doppler_hz : cur.doppler_hz;
+        const absHz = nomHz + dHz;
+        freqStr = absHz.toFixed(3) + ' Hz';
+        const sign = dHz >= 0 ? '+' : '';
+        doppStr = `<span class="map-freq-doppler">${sign}${dHz.toFixed(3)} Hz</span>`;
+      }
+      rows.push(`<div class="map-freq-row">
+        <span class="map-freq-dot" style="background:${colour}"></span>
+        <span class="map-freq-label">${label}</span>
+        <span class="map-freq-value">${freqStr}</span>
+        ${doppStr}
+      </div>`);
+    });
 
     el.innerHTML = rows.length
       ? `<div class="map-freq-title">Received frequency</div>${rows.join('')}`
