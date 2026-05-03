@@ -28,6 +28,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
@@ -1619,19 +1620,58 @@ func (m *stationManager) add(cfg stationConfig) (*DopplerStation, error) {
 	return ds, nil
 }
 
-// remove stops and removes a station by label.
+// remove stops and removes a station by label and deletes all persistent data
+// files (history JSON and Grape CSV) associated with that station.
 func (m *stationManager) remove(label string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	for i, ds := range m.stations {
 		if ds.cfg.Label == label {
+			safeLabel := ds.historySafeLabel
+			csvLabel := strings.ReplaceAll(label, " ", "")
+			csvLabel = strings.ReplaceAll(csvLabel, "/", "-")
 			m.stations = append(m.stations[:i], m.stations[i+1:]...)
 			log.Printf("[manager] removed station %s", label)
 			go m.save()
+			go deleteStationFiles(m.dataDir, safeLabel, csvLabel)
 			return nil
 		}
 	}
 	return fmt.Errorf("station %q not found", label)
+}
+
+// deleteStationFiles walks the data directory tree and removes all history JSON
+// and Grape CSV files that belong to the given station.
+//
+// History files match:  history-<safeLabel>.json
+// CSV files match:      *_FRQ_<csvLabel>.csv
+func deleteStationFiles(dataDir, safeLabel, csvLabel string) {
+	if dataDir == "" {
+		return
+	}
+	historyName := "history-" + safeLabel + ".json"
+	csvSuffix := "_FRQ_" + csvLabel + ".csv"
+
+	err := filepath.Walk(dataDir, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return nil // skip unreadable entries
+		}
+		if info.IsDir() {
+			return nil
+		}
+		name := info.Name()
+		if name == historyName || strings.HasSuffix(name, csvSuffix) {
+			if removeErr := os.Remove(path); removeErr != nil {
+				log.Printf("[manager] delete file %s: %v", path, removeErr)
+			} else {
+				log.Printf("[manager] deleted %s", path)
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		log.Printf("[manager] deleteStationFiles walk error: %v", err)
+	}
 }
 
 // update replaces the config for an existing station (by ID) and restarts it.
