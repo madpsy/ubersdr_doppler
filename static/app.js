@@ -843,11 +843,20 @@ function xAxisConfig(showTitle) {
     type: 'time',
     time: {
       unit: 'minute',
-      displayFormats: { minute: 'HH:mm', hour: 'HH:mm' },
       tooltipFormat: 'HH:mm:ss',
     },
-    adapters: { date: { timeZone: 'UTC' } },
-    ticks: { color: '#8b949e', maxTicksLimit: 10, source: 'auto' },
+    ticks: {
+      color: '#8b949e',
+      maxTicksLimit: 10,
+      source: 'auto',
+      // Format tick labels in UTC regardless of browser timezone
+      callback(value, index, ticks) {
+        const d = new Date(ticks[index]?.value ?? value);
+        const hh = String(d.getUTCHours()).padStart(2, '0');
+        const mm = String(d.getUTCMinutes()).padStart(2, '0');
+        return `${hh}:${mm}`;
+      },
+    },
     grid: { color: '#21262d' },
     title: showTitle
       ? { display: true, text: 'UTC time', color: '#8b949e', font: { size: 11 } }
