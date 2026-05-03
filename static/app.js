@@ -923,25 +923,29 @@ function greatCirclePoint(a, b, t) {
  */
 function estimateHopCount(distKm, freqHz) {
   const R = 6371; // Earth radius km
-  const elMin = 3 * Math.PI / 180; // minimum elevation in radians (3°)
 
-  let hv; // virtual reflection height (km)
-  if (freqHz < 5e6)       hv = 200;
-  else if (freqHz < 10e6) hv = 300;
-  else if (freqHz < 20e6) hv = 350;
-  else                    hv = 400;
+  // Virtual F2-layer reflection height (km), frequency-dependent.
+  // These are conservative (lower) values to avoid under-counting hops:
+  //   lower h_v → shorter max hop → more hops for a given path length.
+  // Values are representative of typical daytime F2 conditions per ITU-R P.533.
+  let hv;
+  if (freqHz < 5e6)       hv = 180; // lower F1/F2
+  else if (freqHz < 8e6)  hv = 250; // mid F2
+  else if (freqHz < 15e6) hv = 300; // high F2 (10–15 MHz)
+  else if (freqHz < 25e6) hv = 330; // very high F2
+  else                    hv = 360; // near-MUF
 
-  // Ground range of one F-layer hop for a ray leaving at elevation angle elMin:
-  //
-  //   The ray travels from ground (radius R) to the reflection height (radius R+hv).
-  //   By the sine rule in the triangle (Earth centre, TX, reflection point):
-  //     sin(90° + elMin) / (R + hv) = sin(α) / R
-  //   where α is the angle at the reflection point.
-  //   The central angle subtended by one half-hop:
-  //     θ_half = 90° - elMin - arcsin(R·cos(elMin)/(R+hv))
-  //   Full hop ground range:
-  //     maxHopKm = 2 * R * θ_half  (θ_half in radians)
-  //
+  // Minimum practical elevation angle for reliable F2 propagation.
+  // Using 2° (rather than 3°) gives a slightly longer max hop, which is
+  // appropriate since we want to find the *minimum* hop count (i.e. the
+  // longest hops the ionosphere can support at this frequency).
+  const elMin = 2 * Math.PI / 180;
+
+  // Ground range of one F-layer hop for a ray leaving at elevation elMin.
+  // Derived from the sine rule in the Earth-centre / TX / reflection-point triangle:
+  //   sin(90° + elMin) / (R + hv) = sin(α) / R
+  //   θ_half = 90° - elMin - arcsin(R·cos(elMin) / (R + hv))
+  //   maxHopKm = 2 * R * θ_half
   const sinArg = R * Math.cos(elMin) / (R + hv);
   const thetaHalf = Math.PI / 2 - elMin - Math.asin(sinArg);
   const maxHopKm = 2 * R * thetaHalf;
