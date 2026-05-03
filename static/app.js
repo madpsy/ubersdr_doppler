@@ -1013,63 +1013,98 @@ const sunLinePlugin = {
     const xMax = state.zoomedXMax ?? win.max;
 
     const ctx = chart.ctx;
-    ctx.save();
-    ctx.beginPath();
-    ctx.rect(xScale.left, yScale.top, xScale.right - xScale.left, yScale.bottom - yScale.top);
-    ctx.clip();
-    ctx.font = '9px sans-serif';
-    ctx.textAlign = 'center';
 
-    // Process each non-reference station that has a grid square
+    // Collect all lines to draw so we can draw lines (clipped) then labels (unclipped)
+    const lines = []; // { x, strokeStyle, dash, fillStyle, label, labelY }
+
     state.stations.forEach((s, stationIdx) => {
       if (!s.config || !s.config.grid || s.config.is_reference) return;
       const txPos = maidenheadToLatLon(s.config.grid);
       if (!txPos) return;
 
       const freqHz = s.config.freq_hz || 10e6;
+      const distKm = haversineKm(rxPos, txPos);
+      const N = estimateHopCount(distKm, freqHz);
+      console.log(`[sunLine] ${s.config.label}: rx=${JSON.stringify(rxPos)} tx=${JSON.stringify(txPos)} dist=${distKm.toFixed(0)}km freq=${(freqHz/1e6).toFixed(3)}MHz hops=${N}`);
       const reflPoints = hopReflectionPoints(rxPos, txPos, freqHz);
       const stationColour = colourForIndex(stationIdx);
 
       reflPoints.forEach(({ lat, lon, hopIndex, totalHops }) => {
         const times = sunTimesAt(lat, lon, xMin, xMax);
-        // Label: station name + hop number only when multi-hop
-        const hopLabel = totalHops > 1 ? ` h${hopIndex}` : '';
+        const hopLabel = totalHops > 1 ? ` h${hopIndex}/${totalHops}` : '';
         const srLabel = `☀↑ ${s.config.label}${hopLabel}`;
         const ssLabel = `☀↓ ${s.config.label}${hopLabel}`;
 
         times.forEach(({ sunrise, sunset }) => {
-          // Sunrise line — lighter tint of station colour
           const srX = xScale.getPixelForValue(sunrise.getTime());
           if (srX >= xScale.left && srX <= xScale.right) {
-            ctx.strokeStyle = stationColour + 'aa';
-            ctx.lineWidth = 1.5;
-            ctx.setLineDash([4, 3]);
-            ctx.beginPath();
-            ctx.moveTo(srX, yScale.top);
-            ctx.lineTo(srX, yScale.bottom);
-            ctx.stroke();
-            ctx.fillStyle = stationColour + 'cc';
-            ctx.fillText(srLabel, srX, yScale.top + 9);
+            lines.push({
+              x: srX,
+              strokeStyle: stationColour + 'aa',
+              dash: [4, 3],
+              fillStyle: stationColour + 'dd',
+              label: srLabel,
+            });
           }
-
-          // Sunset line — same colour, different dash
           const ssX = xScale.getPixelForValue(sunset.getTime());
           if (ssX >= xScale.left && ssX <= xScale.right) {
-            ctx.strokeStyle = stationColour + '77';
-            ctx.lineWidth = 1.5;
-            ctx.setLineDash([2, 4]);
-            ctx.beginPath();
-            ctx.moveTo(ssX, yScale.top);
-            ctx.lineTo(ssX, yScale.bottom);
-            ctx.stroke();
-            ctx.fillStyle = stationColour + 'aa';
-            ctx.fillText(ssLabel, ssX, yScale.top + 9);
+            lines.push({
+              x: ssX,
+              strokeStyle: stationColour + '66',
+              dash: [2, 4],
+              fillStyle: stationColour + 'aa',
+              label: ssLabel,
+            });
           }
         });
       });
     });
 
+    if (!lines.length) return;
+
+    // ── Pass 1: draw vertical lines inside the plot clip region ──────────────
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(xScale.left, yScale.top, xScale.right - xScale.left, yScale.bottom - yScale.top);
+    ctx.clip();
+    ctx.lineWidth = 1.5;
+    lines.forEach(({ x, strokeStyle, dash }) => {
+      ctx.strokeStyle = strokeStyle;
+      ctx.setLineDash(dash);
+      ctx.beginPath();
+      ctx.moveTo(x, yScale.top);
+      ctx.lineTo(x, yScale.bottom);
+      ctx.stroke();
+    });
     ctx.setLineDash([]);
+    ctx.restore();
+
+    // ── Pass 2: draw labels above the plot area (no clip) ────────────────────
+    ctx.save();
+    ctx.font = '9px sans-serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'bottom';
+    // Stagger label rows to avoid overlap when lines are close together.
+    // Sort lines by x so we can assign alternating rows.
+    const sorted = [...lines].sort((a, b) => a.x - b.x);
+    const rowHeight = 11; // px per label row
+    const minSepPx = 30;  // minimum x separation before staggering
+    let row = 0;
+    let lastX = -Infinity;
+    sorted.forEach(line => {
+      if (line.x - lastX < minSepPx) {
+        row = (row + 1) % 3; // cycle through up to 3 rows
+      } else {
+        row = 0;
+      }
+      line._row = row;
+      lastX = line.x;
+    });
+    lines.forEach(({ x, fillStyle, label, _row }) => {
+      const labelY = yScale.top - 2 - (_row ?? 0) * rowHeight;
+      ctx.fillStyle = fillStyle;
+      ctx.fillText(label, x, labelY);
+    });
     ctx.restore();
   },
 };
