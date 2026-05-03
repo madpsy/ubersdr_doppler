@@ -1038,23 +1038,19 @@ const sunLinePlugin = {
       if (!txPos) return;
 
       const freqHz = s.config.freq_hz || 10e6;
-      const distKm = haversineKm(rxPos, txPos);
-      const N = estimateHopCount(distKm, freqHz);
       const reflPoints = hopReflectionPoints(rxPos, txPos, freqHz);
       const stationColour = colourForIndex(stationIdx);
 
       reflPoints.forEach(({ lat, lon, hopIndex, totalHops }) => {
         const times = sunTimesAt(lat, lon, xMin, xMax);
         const hopLabel = totalHops > 1 ? ` h${hopIndex}/${totalHops}` : '';
-        const srLabel = `☀↑ ${s.config.label}${hopLabel}`;
-        const ssLabel = `☀↓ ${s.config.label}${hopLabel}`;
+        const srLabel = `☀️ ${s.config.label}${hopLabel}`;
+        const ssLabel = `🌙 ${s.config.label}${hopLabel}`;
 
-        console.log(`[sunLine] ${s.config.label} hop${hopIndex}/${totalHops} lat=${lat.toFixed(2)} lon=${lon.toFixed(2)} dist=${distKm.toFixed(0)}km hops=${N} xMin=${new Date(xMin).toISOString()} xMax=${new Date(xMax).toISOString()}`);
         times.forEach(({ sunrise, sunset }) => {
           const srX = xScale.getPixelForValue(sunrise.getTime());
           const ssX = xScale.getPixelForValue(sunset.getTime());
           const inWindow = t => t >= xScale.left && t <= xScale.right;
-          console.log(`  sunrise=${sunrise.toISOString()} x=${srX.toFixed(0)} inWindow=${inWindow(srX)} | sunset=${sunset.toISOString()} x=${ssX.toFixed(0)} inWindow=${inWindow(ssX)}`);
           if (inWindow(srX)) {
             lines.push({
               x: srX,
