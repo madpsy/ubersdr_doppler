@@ -865,45 +865,118 @@ function xAxisConfig(showTitle) {
 }
 
 // ---------------------------------------------------------------------------
-// Midpoint sun times helper
-//
-// Returns an array of {sunrise: Date, sunset: Date} objects — one per UTC
-// calendar day that falls within the current chart X-axis range — computed
-// at the geographic midpoint between the receiver and the first station that
-// has a grid square configured.  Returns [] when the prerequisite data is
-// not yet available.
+// HF propagation geometry helpers
 // ---------------------------------------------------------------------------
-function getMidpointSunTimes(xMin, xMax) {
-  if (!state.showMidpointSun) return [];
-  if (typeof SunCalc === 'undefined') return [];
 
-  // Receiver position
-  const rxGrid = state.receiverGrid;
-  if (!rxGrid) return [];
-  const rxPos = maidenheadToLatLon(rxGrid);
-  if (!rxPos) return [];
+/**
+ * Interpolate a point at fractional distance `t` (0–1) along the great-circle
+ * arc from point `a` to point `b` using spherical linear interpolation (slerp).
+ * Returns {lat, lon} in degrees.
+ */
+function greatCirclePoint(a, b, t) {
+  const toRad = Math.PI / 180;
+  const toDeg = 180 / Math.PI;
+  const φ1 = a.lat * toRad, λ1 = a.lon * toRad;
+  const φ2 = b.lat * toRad, λ2 = b.lon * toRad;
 
-  // First non-reference station with a grid square
-  const txStation = state.stations.find(s => s.config && s.config.grid && !s.config.is_reference);
-  if (!txStation) return [];
-  const txPos = maidenheadToLatLon(txStation.config.grid);
-  if (!txPos) return [];
+  // Angular distance between the two points (central angle)
+  const sinHalfΔφ = Math.sin((φ2 - φ1) / 2);
+  const sinHalfΔλ = Math.sin((λ2 - λ1) / 2);
+  const d = 2 * Math.asin(Math.sqrt(
+    sinHalfΔφ * sinHalfΔφ +
+    Math.cos(φ1) * Math.cos(φ2) * sinHalfΔλ * sinHalfΔλ
+  ));
 
-  // Geographic midpoint
-  const midLat = (rxPos.lat + txPos.lat) / 2;
-  const midLon = (rxPos.lon + txPos.lon) / 2;
+  if (d < 1e-10) return { lat: a.lat, lon: a.lon }; // coincident points
 
-  // Compute sun times for every UTC calendar day that overlaps [xMin, xMax].
-  // We extend the range by one day on each side so that sunrise/sunset events
-  // that fall just outside the data window (e.g. today's sunrise before the
-  // first data point) are still included and drawn within the visible area.
+  // Slerp weights
+  const A = Math.sin((1 - t) * d) / Math.sin(d);
+  const B = Math.sin(t * d) / Math.sin(d);
+
+  // Convert to ECEF, interpolate, convert back
+  const x = A * Math.cos(φ1) * Math.cos(λ1) + B * Math.cos(φ2) * Math.cos(λ2);
+  const y = A * Math.cos(φ1) * Math.sin(λ1) + B * Math.cos(φ2) * Math.sin(λ2);
+  const z = A * Math.sin(φ1)                 + B * Math.sin(φ2);
+
+  return {
+    lat: Math.atan2(z, Math.sqrt(x * x + y * y)) * toDeg,
+    lon: Math.atan2(y, x) * toDeg,
+  };
+}
+
+/**
+ * Estimate the number of F-layer hops for a given path distance and frequency.
+ *
+ * Model: maximum single-hop ground range is derived from the geometry of a
+ * ray leaving at the minimum practical elevation angle (3°) and reflecting
+ * from the F2 layer.  The virtual reflection height h_v varies with frequency:
+ *
+ *   h_v ≈ 200 km  for f < 5 MHz   (lower F1/F2)
+ *   h_v ≈ 300 km  for 5–10 MHz    (mid F2)
+ *   h_v ≈ 350 km  for 10–20 MHz   (high F2)
+ *   h_v ≈ 400 km  for > 20 MHz    (very high F2 / sporadic-E not modelled)
+ *
+ * Max hop ground range = 2 * R * arccos(R / (R + h_v) * cos(elMin))
+ * where elMin = 3° (practical minimum elevation for reliable F2).
+ *
+ * Returns an integer ≥ 1.
+ */
+function estimateHopCount(distKm, freqHz) {
+  const R = 6371; // Earth radius km
+  const elMin = 3 * Math.PI / 180; // minimum elevation in radians
+
+  let hv; // virtual reflection height (km)
+  if (freqHz < 5e6)       hv = 200;
+  else if (freqHz < 10e6) hv = 300;
+  else if (freqHz < 20e6) hv = 350;
+  else                    hv = 400;
+
+  // Half-hop slant range from geometry: ray from ground at elMin to height hv
+  // Ground range of one hop = 2 * R * (arccos(R*cos(elMin)/(R+hv)) - elMin)
+  const maxHopKm = 2 * R * (Math.acos(R * Math.cos(elMin) / (R + hv)) - elMin);
+
+  return Math.max(1, Math.ceil(distKm / maxHopKm));
+}
+
+/**
+ * Return the ionospheric reflection points for a path from rxPos to txPos
+ * at the given frequency.  For an N-hop path there are N-1 intermediate
+ * reflection points at fractions 1/N, 2/N, …, (N-1)/N along the great circle.
+ * For a single-hop path the single reflection point is at the midpoint (1/2).
+ *
+ * Each returned object is { lat, lon, hopIndex, totalHops }.
+ */
+function hopReflectionPoints(rxPos, txPos, freqHz) {
+  const distKm = haversineKm(rxPos, txPos);
+  const N = estimateHopCount(distKm, freqHz);
+  const points = [];
+  // For N hops there are N-1 ground reflections between TX and RX, but the
+  // ionospheric reflection points are at fractions i/N for i = 1..N-1 when
+  // N > 1, or at 0.5 for N = 1.
+  if (N === 1) {
+    const pt = greatCirclePoint(rxPos, txPos, 0.5);
+    points.push({ ...pt, hopIndex: 1, totalHops: 1 });
+  } else {
+    for (let i = 1; i < N; i++) {
+      const pt = greatCirclePoint(rxPos, txPos, i / N);
+      points.push({ ...pt, hopIndex: i, totalHops: N });
+    }
+  }
+  return points;
+}
+
+/**
+ * Compute sunrise and sunset times at a given lat/lon for every UTC calendar
+ * day that overlaps [xMin, xMax] (extended by ±1 day for edge events).
+ * Returns an array of { sunrise: Date, sunset: Date }.
+ */
+function sunTimesAt(lat, lon, xMin, xMax) {
   const results = [];
   const startDay = new Date(xMin - 24 * 3600 * 1000);
   startDay.setUTCHours(0, 0, 0, 0);
   const endMs = xMax + 24 * 3600 * 1000;
-
   for (let d = new Date(startDay); d.getTime() <= endMs; d.setUTCDate(d.getUTCDate() + 1)) {
-    const times = SunCalc.getTimes(new Date(d), midLat, midLon);
+    const times = SunCalc.getTimes(new Date(d), lat, lon);
     if (times.sunrise && times.sunset &&
         isFinite(times.sunrise.getTime()) && isFinite(times.sunset.getTime())) {
       results.push({ sunrise: times.sunrise, sunset: times.sunset });
@@ -913,58 +986,87 @@ function getMidpointSunTimes(xMin, xMax) {
 }
 
 // ---------------------------------------------------------------------------
-// Chart.js plugin — midpoint sunrise/sunset vertical lines
+// Chart.js plugin — per-station, per-hop sunrise/sunset vertical lines
+//
+// For each non-reference station that has a grid square configured, the
+// ionospheric reflection points are computed along the great-circle path from
+// the receiver to the transmitter.  The number of hops is estimated from the
+// path distance and carrier frequency.  A sunrise and sunset line is drawn for
+// each reflection point, labelled with the station name and hop number.
 // ---------------------------------------------------------------------------
 const sunLinePlugin = {
   id: 'sunLine',
   afterDraw(chart) {
     if (!state.showMidpointSun) return;
+    if (typeof SunCalc === 'undefined') return;
     const xScale = chart.scales.x;
     const yScale = chart.scales.y;
     if (!xScale || !yScale) return;
 
-    // Use the same window range as the chart axes
+    const rxGrid = state.receiverGrid;
+    if (!rxGrid) return;
+    const rxPos = maidenheadToLatLon(rxGrid);
+    if (!rxPos) return;
+
     const win = chartWindowRange();
     const xMin = state.zoomedXMin ?? win.min;
     const xMax = state.zoomedXMax ?? win.max;
-
-    const sunTimes = getMidpointSunTimes(xMin, xMax);
-    if (!sunTimes.length) return;
 
     const ctx = chart.ctx;
     ctx.save();
     ctx.beginPath();
     ctx.rect(xScale.left, yScale.top, xScale.right - xScale.left, yScale.bottom - yScale.top);
     ctx.clip();
+    ctx.font = '9px sans-serif';
+    ctx.textAlign = 'center';
 
-    sunTimes.forEach(({ sunrise, sunset }) => {
-      // Sunrise — golden/amber line
-      const srX = xScale.getPixelForValue(sunrise.getTime());
-      ctx.strokeStyle = 'rgba(255, 200, 60, 0.55)';
-      ctx.lineWidth = 1.5;
-      ctx.setLineDash([4, 3]);
-      ctx.beginPath();
-      ctx.moveTo(srX, yScale.top);
-      ctx.lineTo(srX, yScale.bottom);
-      ctx.stroke();
-      ctx.fillStyle = 'rgba(255, 200, 60, 0.75)';
-      ctx.font = '9px sans-serif';
-      ctx.textAlign = 'center';
-      ctx.fillText('☀ rise', srX, yScale.top + 9);
+    // Process each non-reference station that has a grid square
+    state.stations.forEach((s, stationIdx) => {
+      if (!s.config || !s.config.grid || s.config.is_reference) return;
+      const txPos = maidenheadToLatLon(s.config.grid);
+      if (!txPos) return;
 
-      // Sunset — orange/red line
-      const ssX = xScale.getPixelForValue(sunset.getTime());
-      ctx.strokeStyle = 'rgba(255, 120, 40, 0.55)';
-      ctx.lineWidth = 1.5;
-      ctx.setLineDash([4, 3]);
-      ctx.beginPath();
-      ctx.moveTo(ssX, yScale.top);
-      ctx.lineTo(ssX, yScale.bottom);
-      ctx.stroke();
-      ctx.fillStyle = 'rgba(255, 120, 40, 0.75)';
-      ctx.font = '9px sans-serif';
-      ctx.textAlign = 'center';
-      ctx.fillText('☀ set', ssX, yScale.top + 9);
+      const freqHz = s.config.freq_hz || 10e6;
+      const reflPoints = hopReflectionPoints(rxPos, txPos, freqHz);
+      const stationColour = colourForIndex(stationIdx);
+
+      reflPoints.forEach(({ lat, lon, hopIndex, totalHops }) => {
+        const times = sunTimesAt(lat, lon, xMin, xMax);
+        // Label: station name + hop number only when multi-hop
+        const hopLabel = totalHops > 1 ? ` h${hopIndex}` : '';
+        const srLabel = `☀↑ ${s.config.label}${hopLabel}`;
+        const ssLabel = `☀↓ ${s.config.label}${hopLabel}`;
+
+        times.forEach(({ sunrise, sunset }) => {
+          // Sunrise line — lighter tint of station colour
+          const srX = xScale.getPixelForValue(sunrise.getTime());
+          if (srX >= xScale.left && srX <= xScale.right) {
+            ctx.strokeStyle = stationColour + 'aa';
+            ctx.lineWidth = 1.5;
+            ctx.setLineDash([4, 3]);
+            ctx.beginPath();
+            ctx.moveTo(srX, yScale.top);
+            ctx.lineTo(srX, yScale.bottom);
+            ctx.stroke();
+            ctx.fillStyle = stationColour + 'cc';
+            ctx.fillText(srLabel, srX, yScale.top + 9);
+          }
+
+          // Sunset line — same colour, different dash
+          const ssX = xScale.getPixelForValue(sunset.getTime());
+          if (ssX >= xScale.left && ssX <= xScale.right) {
+            ctx.strokeStyle = stationColour + '77';
+            ctx.lineWidth = 1.5;
+            ctx.setLineDash([2, 4]);
+            ctx.beginPath();
+            ctx.moveTo(ssX, yScale.top);
+            ctx.lineTo(ssX, yScale.bottom);
+            ctx.stroke();
+            ctx.fillStyle = stationColour + 'aa';
+            ctx.fillText(ssLabel, ssX, yScale.top + 9);
+          }
+        });
+      });
     });
 
     ctx.setLineDash([]);
