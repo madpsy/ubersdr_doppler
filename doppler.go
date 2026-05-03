@@ -297,6 +297,9 @@ type DopplerStation struct {
 	minSNR           float64
 	maxDriftHz       float64
 
+	// cancel stops this station's run goroutine independently of the global context.
+	cancel context.CancelFunc
+
 	hub       *sseHub
 	csvWriter *csvWriter
 
@@ -363,6 +366,7 @@ func newDopplerStation(cfg stationConfig, ubersdrURL, dataDir string, hub *sseHu
 		hub:              hub,
 		csvWriter:        cw,
 		audioHub:         newAudioBroadcastHub(),
+		cancel:           func() {}, // no-op until run() is started
 	}
 }
 
@@ -1513,11 +1517,13 @@ func (m *stationManager) startAll(ctx context.Context) {
 		if !ds.cfg.Enabled {
 			continue
 		}
+		stationCtx, stationCancel := context.WithCancel(ctx)
+		ds.cancel = stationCancel
 		m.wg.Add(1)
-		go func(d *DopplerStation) {
+		go func(d *DopplerStation, c context.Context) {
 			defer m.wg.Done()
-			d.run(ctx)
-		}(ds)
+			d.run(c)
+		}(ds, stationCtx)
 	}
 }
 
@@ -1608,10 +1614,12 @@ func (m *stationManager) add(cfg stationConfig) (*DopplerStation, error) {
 	m.mu.Unlock()
 
 	if m.ctx != nil && cfg.Enabled {
+		stationCtx, stationCancel := context.WithCancel(m.ctx)
+		ds.cancel = stationCancel
 		m.wg.Add(1)
 		go func() {
 			defer m.wg.Done()
-			ds.run(m.ctx)
+			ds.run(stationCtx)
 		}()
 	}
 
@@ -1630,6 +1638,7 @@ func (m *stationManager) remove(label string) error {
 			safeLabel := ds.historySafeLabel
 			csvLabel := strings.ReplaceAll(label, " ", "")
 			csvLabel = strings.ReplaceAll(csvLabel, "/", "-")
+			ds.cancel() // stop the station's run goroutine
 			m.stations = append(m.stations[:i], m.stations[i+1:]...)
 			log.Printf("[manager] removed station %s", label)
 			go m.save()
@@ -1703,10 +1712,12 @@ func (m *stationManager) update(id string, cfg stationConfig) error {
 	m.mu.Unlock()
 
 	if m.ctx != nil && cfg.Enabled {
+		stationCtx, stationCancel := context.WithCancel(m.ctx)
+		target.cancel = stationCancel
 		m.wg.Add(1)
 		go func() {
 			defer m.wg.Done()
-			target.run(m.ctx)
+			target.run(stationCtx)
 		}()
 	}
 
