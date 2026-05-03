@@ -1036,6 +1036,9 @@ const sunLinePlugin = {
 
     state.stations.forEach((s, stationIdx) => {
       if (!s.config || !s.config.grid || s.config.is_reference) return;
+      // Skip if this station's dataset is hidden in the chart legend
+      const ds = chart.data.datasets.find(d => d.label === s.config.label && !d._isBand);
+      if (ds && ds.hidden) return;
       const txPos = maidenheadToLatLon(s.config.grid);
       if (!txPos) return;
 
