@@ -1141,7 +1141,7 @@ function initCharts() {
       responsive: true,
       maintainAspectRatio: false,
       interaction: { mode: 'index', intersect: false },
-      layout: { padding: { top: 36 } },
+      layout: { padding: { top: 28 } },
       scales: {
         x: xAxisConfig(false),
         y: {
@@ -1175,8 +1175,10 @@ function initCharts() {
       },
       plugins: {
         legend: {
+          position: 'bottom',
           labels: {
             color: '#e6edf3', boxWidth: 12,
+            padding: 10,
             // Hide the min/max band datasets from the legend
             filter: item => !item.text.endsWith(' min') && !item.text.endsWith(' max'),
           },
