@@ -422,8 +422,8 @@ window.DopplerMap = (() => {
     addTerminator();
     buildLegend();
     buildClock();
-    buildStationToggleControl();
     buildFreqReadout();
+    buildStationToggleControl();
 
     // Refresh terminator every 60 s
     terminatorTimer = setInterval(() => {

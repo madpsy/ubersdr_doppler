@@ -532,7 +532,6 @@ tr.row-stale td  { background: rgba(210,153,34,0.08); }
   color: var(--text);
   min-width: 120px;
   backdrop-filter: blur(4px);
-  margin-bottom: 6px;
 }
 .map-toggle-title {
   font-weight: 700;
