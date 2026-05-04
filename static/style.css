@@ -667,7 +667,13 @@ tr.row-stale td  { background: rgba(210,153,34,0.08); }
   padding: 1px 5px;
   font-size: 0.75rem;
   color: var(--accent);
-  white-space: nowrap;
+  white-space: normal;
+  word-break: break-all;
+}
+/* curl example cells should wrap rather than overflow the table */
+.api-table td:last-child code {
+  color: var(--green);
+  word-break: break-all;
 }
 .api-example {
   background: var(--bg);
@@ -680,7 +686,8 @@ tr.row-stale td  { background: rgba(210,153,34,0.08); }
 }
 .api-example code {
   color: var(--green);
-  white-space: nowrap;
+  white-space: pre-wrap;
+  word-break: break-all;
 }
 .api-notes {
   list-style: disc;
