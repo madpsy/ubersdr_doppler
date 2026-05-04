@@ -35,7 +35,10 @@
       <form id="login-form">
         <div class="form-row">
           <label>Password
-            <input type="password" id="login-password" placeholder="UI password" required autocomplete="current-password">
+            <div class="password-input-wrap">
+              <input type="password" id="login-password" placeholder="UI password" required autocomplete="current-password">
+              <button type="button" id="login-pw-toggle" class="btn-pw-toggle" title="Show/hide password" aria-label="Show password">👁</button>
+            </div>
           </label>
         </div>
         <div id="login-error" style="color:var(--red);font-size:0.82rem;display:none;margin-bottom:8px"></div>
@@ -377,6 +380,7 @@
         <label>Date (UTC): <input type="date" id="dl-date"></label>
         <button id="dl-btn" class="btn btn-secondary">⬇ Download CSV</button>
       </div>
+      <p id="dl-error" style="display:none;color:var(--red);font-size:0.82rem;margin-top:6px"></p>
       <p class="hint">CSV files contain 1-minute-mean Doppler observations.
         Columns: <code>timestamp_utc, station, freq_hz, doppler_hz, corrected_doppler_hz, snr_db, signal_dbfs, noise_dbfs, callsign, grid, frequency_reference</code></p>
     </section>

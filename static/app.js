@@ -213,10 +213,14 @@ function updateAuthUI() {
 }
 
 function openLoginModal() {
-  document.getElementById('login-password').value = '';
+  const pwInput = document.getElementById('login-password');
+  pwInput.value = '';
+  pwInput.type = 'password';
+  const pwToggle = document.getElementById('login-pw-toggle');
+  if (pwToggle) { pwToggle.textContent = '👁'; pwToggle.setAttribute('aria-label', 'Show password'); }
   document.getElementById('login-error').style.display = 'none';
   document.getElementById('login-modal').classList.remove('hidden');
-  document.getElementById('login-password').focus();
+  pwInput.focus();
 }
 
 function closeLoginModal() {
@@ -2248,6 +2252,17 @@ document.addEventListener('DOMContentLoaded', async () => {
   // ── Login modal ───────────────────────────────────────────────────────────
   const loginCancel = document.getElementById('login-cancel');
   if (loginCancel) loginCancel.addEventListener('click', closeLoginModal);
+
+  const pwToggle = document.getElementById('login-pw-toggle');
+  if (pwToggle) {
+    pwToggle.addEventListener('click', () => {
+      const pwInput = document.getElementById('login-password');
+      const showing = pwInput.type === 'text';
+      pwInput.type = showing ? 'password' : 'text';
+      pwToggle.textContent = showing ? '👁' : '🙈';
+      pwToggle.setAttribute('aria-label', showing ? 'Show password' : 'Hide password');
+    });
+  }
   const loginModal = document.getElementById('login-modal');
   if (loginModal) {
     loginModal.addEventListener('click', e => {
@@ -2474,11 +2489,40 @@ document.addEventListener('DOMContentLoaded', async () => {
   });
 
   // ── CSV download ──────────────────────────────────────────────────────────
-  document.getElementById('dl-btn').addEventListener('click', () => {
+  document.getElementById('dl-btn').addEventListener('click', async () => {
     const station = document.getElementById('dl-station').value;
     const date    = document.getElementById('dl-date').value;
-    if (!station || !date) { alert('Select a station and date.'); return; }
-    window.location.href = `${BASE}/api/csv?station=${encodeURIComponent(station)}&date=${date}`;
+    const errEl   = document.getElementById('dl-error');
+    errEl.style.display = 'none';
+    if (!station || !date) { errEl.textContent = 'Select a station and date.'; errEl.style.display = ''; return; }
+    const btn = document.getElementById('dl-btn');
+    btn.disabled = true;
+    btn.textContent = '⏳ Downloading…';
+    try {
+      const r = await fetch(`${BASE}/api/csv?station=${encodeURIComponent(station)}&date=${date}`);
+      if (!r.ok) {
+        const msg = await r.text();
+        errEl.textContent = msg.trim() || `Error ${r.status}`;
+        errEl.style.display = '';
+        return;
+      }
+      const blob = await r.blob();
+      const disposition = r.headers.get('Content-Disposition') || '';
+      const fnMatch = disposition.match(/filename="([^"]+)"/);
+      const filename = fnMatch ? fnMatch[1] : `doppler_${station}_${date}.csv`;
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url; a.download = filename;
+      document.body.appendChild(a); a.click();
+      document.body.removeChild(a);
+      setTimeout(() => URL.revokeObjectURL(url), 10000);
+    } catch (err) {
+      errEl.textContent = 'Download failed: ' + err.message;
+      errEl.style.display = '';
+    } finally {
+      btn.disabled = false;
+      btn.textContent = '⬇ Download CSV';
+    }
   });
 
   // Default download date to today (UTC)

@@ -230,6 +230,23 @@ tr.row-stale td  { background: rgba(210,153,34,0.08); }
 .checkbox-label { flex-direction: row !important; align-items: center; gap: 8px !important; color: var(--text) !important; }
 .form-actions { display: flex; gap: 10px; justify-content: flex-end; margin-top: 20px; }
 
+/* Password show/hide toggle */
+.password-input-wrap { position: relative; display: flex; align-items: center; }
+.password-input-wrap input[type="password"],
+.password-input-wrap input[type="text"] {
+  flex: 1; padding-right: 38px;
+  background: var(--bg); color: var(--text); border: 1px solid var(--border);
+  border-radius: 4px; padding: 6px 38px 6px 10px; font-size: 0.9rem; width: 100%;
+}
+.btn-pw-toggle {
+  position: absolute; right: 6px;
+  background: none; border: none; cursor: pointer;
+  color: var(--muted); font-size: 1rem; line-height: 1;
+  padding: 2px 4px; border-radius: 3px;
+  transition: color 0.15s;
+}
+.btn-pw-toggle:hover { color: var(--text); }
+
 /* Download */
 .download-controls { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; margin-bottom: 10px; }
 .download-controls label { display: flex; align-items: center; gap: 8px; color: var(--muted); font-size: 0.85rem; }
