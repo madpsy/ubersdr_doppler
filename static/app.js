@@ -2527,4 +2527,55 @@ document.addEventListener('DOMContentLoaded', async () => {
 
   // Default download date to today (UTC)
   document.getElementById('dl-date').value = new Date().toISOString().slice(0, 10);
+
+  // ── Chart PNG download ────────────────────────────────────────────────────
+  document.getElementById('chart-png-btn').addEventListener('click', () => {
+    // Collect the canvases for visible charts (doppler always shown;
+    // SNR and power only if their wrapper is visible).
+    const panels = [
+      { id: 'doppler-chart', wrap: null },
+      { id: 'snr-chart',     wrap: 'snr-chart-wrap' },
+      { id: 'power-chart',   wrap: 'power-chart-wrap' },
+    ];
+    const canvases = panels
+      .filter(p => !p.wrap || document.getElementById(p.wrap).style.display !== 'none')
+      .map(p => document.getElementById(p.id))
+      .filter(Boolean);
+
+    if (!canvases.length) return;
+
+    const GAP = 8; // px between stacked charts
+    const totalH = canvases.reduce((h, c) => h + c.height, 0) + GAP * (canvases.length - 1);
+    const W = canvases[0].width;
+
+    const out = document.createElement('canvas');
+    out.width  = W;
+    out.height = totalH;
+    const ctx = out.getContext('2d');
+
+    // Dark background matching the UI
+    ctx.fillStyle = '#0d1117';
+    ctx.fillRect(0, 0, W, totalH);
+
+    let y = 0;
+    canvases.forEach(c => {
+      ctx.drawImage(c, 0, y, W, c.height);
+      y += c.height + GAP;
+    });
+
+    // Build a filename: doppler_<date/window>.png
+    const datePart = state.chartDate
+      ? state.chartDate
+      : new Date().toISOString().slice(0, 10);
+    const filename = `doppler_${datePart}.png`;
+
+    out.toBlob(blob => {
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url; a.download = filename;
+      document.body.appendChild(a); a.click();
+      document.body.removeChild(a);
+      setTimeout(() => URL.revokeObjectURL(url), 10000);
+    }, 'image/png');
+  });
 });
