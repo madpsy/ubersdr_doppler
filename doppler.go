@@ -403,7 +403,10 @@ func (ds *DopplerStation) HistoryForDate(date time.Time) []MinuteMean {
 	return h
 }
 
-// saveHistory rewrites today's history day-file with all entries for today.
+// saveHistory merges in-memory minute-means for today into the on-disk history
+// JSON file, then rewrites it. Merging (rather than overwriting) ensures that
+// entries written before a restart are not lost when the rolling in-memory
+// window no longer covers the full day.
 // Must be called with ds.mu held.
 func (ds *DopplerStation) saveHistory() {
 	if ds.historyDataDir == "" || len(ds.history) == 0 {
@@ -415,18 +418,43 @@ func (ds *DopplerStation) saveHistory() {
 	if path == "" {
 		return
 	}
-	// Collect only today's entries
 	dayStart := time.Date(today.Year(), today.Month(), today.Day(), 0, 0, 0, 0, time.UTC)
 	dayEnd := dayStart.Add(24 * time.Hour)
-	var todayEntries []MinuteMean
-	for _, m := range ds.history {
-		if !m.Timestamp.Before(dayStart) && m.Timestamp.Before(dayEnd) {
-			todayEntries = append(todayEntries, m)
+
+	// Start with whatever is already on disk for this day (may include entries
+	// from before the current rolling-window cutoff, e.g. from before a restart).
+	merged := make(map[time.Time]MinuteMean)
+	if existing, err := os.ReadFile(path); err == nil {
+		var onDisk []MinuteMean
+		if json.Unmarshal(existing, &onDisk) == nil {
+			for _, m := range onDisk {
+				if !m.Timestamp.Before(dayStart) && m.Timestamp.Before(dayEnd) {
+					merged[m.Timestamp] = m
+				}
+			}
 		}
 	}
-	if len(todayEntries) == 0 {
+
+	// Overlay with the current in-memory entries (they are authoritative for
+	// any timestamp they cover).
+	for _, m := range ds.history {
+		if !m.Timestamp.Before(dayStart) && m.Timestamp.Before(dayEnd) {
+			merged[m.Timestamp] = m
+		}
+	}
+	if len(merged) == 0 {
 		return
 	}
+
+	// Sort by timestamp before writing
+	todayEntries := make([]MinuteMean, 0, len(merged))
+	for _, m := range merged {
+		todayEntries = append(todayEntries, m)
+	}
+	sort.Slice(todayEntries, func(i, j int) bool {
+		return todayEntries[i].Timestamp.Before(todayEntries[j].Timestamp)
+	})
+
 	// Ensure directory exists
 	dir := fmt.Sprintf("%s/%04d/%02d/%02d",
 		ds.historyDataDir, today.Year(), today.Month(), today.Day())
