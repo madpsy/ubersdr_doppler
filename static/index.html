@@ -185,6 +185,9 @@
           <label class="checkbox-label">
             <input type="checkbox" id="show-power-chart" checked> Signal power
           </label>
+          <label class="checkbox-label">
+            <input type="checkbox" id="show-vpk-chart" checked> Vpk
+          </label>
           <label class="checkbox-label" title="Show/hide the min/max spread band on the Doppler chart">
             <input type="checkbox" id="show-band" checked> Min/max band
           </label>
@@ -204,6 +207,9 @@
       </div>
       <div class="chart-container snr-chart-container" id="power-chart-wrap">
         <canvas id="power-chart"></canvas>
+      </div>
+      <div class="chart-container snr-chart-container" id="vpk-chart-wrap">
+        <canvas id="vpk-chart"></canvas>
       </div>
       <p class="chart-hint">Zero line = no Doppler shift. Positive = ionosphere falling (layer compressed). Negative = ionosphere rising. Gaps = signal below SNR threshold. "Absolute frequency" mode shows received Hz.</p>
       <p class="chart-hint" id="chart-zoom-hint" style="display:none">
@@ -348,11 +354,34 @@
           </label>
         </div>
         <div class="form-row">
+          <label>Latitude
+            <input type="number" id="s-latitude" placeholder="0.0000000" step="0.0000001" min="-90" max="90">
+            <span class="field-hint">Decimal degrees, WGS84 (e.g. 41.3219273)</span>
+          </label>
+          <label>Longitude
+            <input type="number" id="s-longitude" placeholder="0.0000000" step="0.0000001" min="-180" max="180">
+            <span class="field-hint">Decimal degrees, WGS84 (e.g. -81.5047731)</span>
+          </label>
+        </div>
+        <div class="form-row">
+          <label>Elevation (m)
+            <input type="number" id="s-elevation" placeholder="0" step="1">
+            <span class="field-hint">Metres above sea level</span>
+          </label>
+          <label>Location (City / State)
+            <input type="text" id="s-location" placeholder="e.g. Macedonia Ohio">
+            <span class="field-hint">Free-text location description for CSV metadata</span>
+          </label>
+        </div>
+        <div class="form-row">
           <label>Manual Frequency Offset (Hz)
             <input type="number" id="s-manual-offset" value="0" step="0.1">
             <span class="field-hint">Static correction subtracted from all readings. Use when hardware clock offset is known. 0 = disabled.</span>
           </label>
-          <label>&#8203;</label>
+          <label>Amplitude Calibration Offset (dB)
+            <input type="number" id="s-cal-offset" value="0" step="0.1">
+            <span class="field-hint">Added to raw dBFS before computing Vpk. Positive = boost (system reads low); negative = cut. 0 = disabled.</span>
+          </label>
         </div>
         <div class="form-row">
           <label>Frequency Reference
@@ -384,13 +413,135 @@
         <button id="dl-btn" class="btn btn-secondary">⬇ Download CSV</button>
       </div>
       <p id="dl-error" style="display:none;color:var(--red);font-size:0.82rem;margin-top:6px"></p>
-      <p class="hint">CSV files contain 1-minute-mean Doppler observations.
-        Columns: <code>timestamp_utc, station, freq_hz, doppler_hz, corrected_doppler_hz, snr_db, signal_dbfs, noise_dbfs, callsign, grid, frequency_reference</code></p>
+      <p class="hint">Downloads a HamSCI Grape-format CSV file. The file begins with a <code>#</code> metadata
+        header block: the first line is <code>#,&lt;timestamp&gt;,&lt;node&gt;,&lt;grid&gt;,&lt;lat&gt;,&lt;lon&gt;,&lt;elev&gt;,&lt;location&gt;,G1,&lt;station&gt;</code>,
+        followed by a <code>#######</code> comment block containing station metadata (node number, callsign, grid square,
+        lat/lon/elevation, city/state, beacon, nominal frequency, frequency standard, radio). The final header line is the column header
+        <code>UTC,Freq,Vpk</code>. Each subsequent data row is one 1-second observation:
+        <code>UTC</code> (HH:MM:SS), <code>Freq</code> (received frequency in Hz = nominal + Doppler), <code>Vpk</code> (peak amplitude, linear 0–1).</p>
+    </section>
+
+    <!-- API Reference -->
+    <section id="api-section">
+      <button class="collapsible-toggle" id="api-toggle" aria-expanded="false" aria-controls="api-body">
+        <span class="collapsible-title">⚙ API Reference</span>
+        <span class="collapsible-chevron" aria-hidden="true">▶</span>
+      </button>
+      <div class="collapsible-body" id="api-body" hidden>
+
+        <p class="api-intro">All endpoints are read-only <code>GET</code> requests unless noted. Responses are JSON unless the endpoint returns CSV. The <code>curl</code> examples below use the URL you are currently viewing this page on.</p>
+
+        <!-- CSV download -->
+        <div class="api-group">
+          <h3 class="api-group-title">CSV Download &mdash; <code>GET /api/csv</code></h3>
+          <p class="api-desc">Returns 1-second Grape-format CSV data for a station. Three mutually exclusive time-range modes:</p>
+
+          <table class="api-table">
+            <thead><tr><th>Mode</th><th>Parameters</th><th>curl example</th></tr></thead>
+            <tbody>
+              <tr>
+                <td>Full UTC day</td>
+                <td><code>station=</code> &amp; <code>date=YYYY-MM-DD</code></td>
+                <td><code>curl "http://localhost:8080/api/csv?station=WWV-10&amp;date=2026-05-04" -o wwv10.csv</code></td>
+              </tr>
+              <tr>
+                <td>Relative window</td>
+                <td><code>station=</code> &amp; <code>last=&lt;N&gt;[s|m|h]</code></td>
+                <td><code>curl "http://localhost:8080/api/csv?station=WWV-10&amp;last=15m" -o wwv10_15m.csv</code></td>
+              </tr>
+              <tr>
+                <td>Absolute range</td>
+                <td><code>station=</code> &amp; <code>start=&lt;RFC3339&gt;</code> [&amp; <code>end=&lt;RFC3339&gt;</code>]</td>
+                <td><code>curl "http://localhost:8080/api/csv?station=WWV-10&amp;start=2026-05-04T16:45:00Z&amp;end=2026-05-04T17:00:00Z" -o wwv10_range.csv</code></td>
+              </tr>
+            </tbody>
+          </table>
+
+          <ul class="api-notes">
+            <li><code>last=</code> units: <code>s</code> seconds, <code>m</code> minutes, <code>h</code> hours (e.g. <code>last=15m</code>, <code>last=1h</code>, <code>last=3600s</code>).</li>
+            <li>When <code>end=</code> is omitted with <code>start=</code>, end defaults to now.</li>
+            <li>Windows that span midnight automatically read from both UTC day files.</li>
+            <li>Output format: Grape <code>#</code> metadata header + <code>UTC,Freq,Vpk</code> rows (identical to the full-day download).</li>
+          </ul>
+        </div>
+
+        <!-- Live data -->
+        <div class="api-group">
+          <h3 class="api-group-title">Live Station Data &mdash; <code>GET /api/stations</code></h3>
+          <p class="api-desc">Returns a JSON array of all stations with their current reading, 60-minute baseline mean, and latest spectrum snapshot.</p>
+          <div class="api-example"><code>curl http://localhost:8080/api/stations</code></div>
+        </div>
+
+        <!-- SSE stream -->
+        <div class="api-group">
+          <h3 class="api-group-title">Live SSE Stream &mdash; <code>GET /api/events</code></h3>
+          <p class="api-desc">Server-Sent Events stream of 1-second Doppler readings. Optional <code>station=</code> filter; omit to receive all stations.</p>
+          <div class="api-example"><code>curl -N "http://localhost:8080/api/events?station=WWV-10"</code></div>
+          <ul class="api-notes">
+            <li>Event types: <code>connected</code> (on connect), <code>heartbeat</code> (every 15 s), <code>spectrum</code> (FFT bins), unnamed data events (readings).</li>
+            <li>Each reading payload: <code>{ station, reading: { timestamp, doppler_hz, corrected_doppler_hz, snr_db, signal_dbfs, noise_dbfs, valid }, server_time }</code></li>
+          </ul>
+        </div>
+
+        <!-- History -->
+        <div class="api-group">
+          <h3 class="api-group-title">Minute-Mean History &mdash; <code>GET /api/history</code></h3>
+          <p class="api-desc">Returns a JSON array of 1-minute mean readings for a station.</p>
+          <table class="api-table">
+            <thead><tr><th>Parameter</th><th>Description</th></tr></thead>
+            <tbody>
+              <tr><td><code>station=</code></td><td>Required. Station label.</td></tr>
+              <tr><td><code>date=YYYY-MM-DD</code></td><td>Optional. Return a specific UTC day from disk. Omit for the rolling 24 h in-memory window.</td></tr>
+              <tr><td><code>smooth=N</code></td><td>Optional. Rolling average window in minutes (1–10). Default 1 (no smoothing).</td></tr>
+            </tbody>
+          </table>
+          <div class="api-example"><code>curl "http://localhost:8080/api/history?station=WWV-10&amp;smooth=5"</code></div>
+        </div>
+
+        <!-- Settings -->
+        <div class="api-group">
+          <h3 class="api-group-title">Global Settings &mdash; <code>GET / POST /api/settings</code></h3>
+          <p class="api-desc"><code>GET</code> returns current settings JSON. <code>POST</code> updates settings (requires auth if a UI password is configured).</p>
+          <div class="api-example"><code>curl http://localhost:8080/api/settings</code></div>
+        </div>
+
+      </div><!-- /.collapsible-body -->
     </section>
   </main>
 
   <script src="L.Terminator.js"></script>
   <script src="app.js"></script>
   <script src="map.js"></script>
+  <script>
+    // Dynamically rewrite hardcoded localhost URLs in curl examples to match
+    // the actual origin + base-path the user is viewing the page on.
+    // BASE is defined in app.js (loaded before this script).
+    (function() {
+      var base = (typeof BASE !== 'undefined' ? BASE : '');
+      var origin = window.location.origin + base;
+      document.querySelectorAll('.api-example code, .api-table td code').forEach(function(el) {
+        if (el.textContent.indexOf('http://localhost:8080') !== -1) {
+          el.textContent = el.textContent.replace(/http:\/\/localhost:8080/g, origin);
+        }
+      });
+    })();
+
+    // Collapsible section toggle (used by the API Reference section)
+    document.querySelectorAll('.collapsible-toggle').forEach(function(btn) {
+      btn.addEventListener('click', function() {
+        var expanded = btn.getAttribute('aria-expanded') === 'true';
+        var bodyId = btn.getAttribute('aria-controls');
+        var body = document.getElementById(bodyId);
+        if (!body) return;
+        expanded = !expanded;
+        btn.setAttribute('aria-expanded', expanded ? 'true' : 'false');
+        if (expanded) {
+          body.removeAttribute('hidden');
+        } else {
+          body.setAttribute('hidden', '');
+        }
+      });
+    });
+  </script>
 </body>
 </html>

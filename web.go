@@ -13,7 +13,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"html/template"
-	"io"
 	"io/fs"
 	"log"
 	"net/http"
@@ -772,4 +771,331 @@ func startHTTPServer(
 			}
 		}
 
-		// ── Gather matching CSV file paths across
+		// Gather matching CSV file paths across all required days.
+		// Each app restart creates a new timestamped file; os.ReadDir returns
+		// entries alphabetically which is chronological for our filenames.
+		suffix := "_FRQ_" + label + ".csv"
+		var matchPaths []string
+		for _, day := range days {
+			dir := filepath.Join(mgr.dataDir,
+				fmt.Sprintf("%04d", day.Year()),
+				fmt.Sprintf("%02d", day.Month()),
+				fmt.Sprintf("%02d", day.Day()),
+			)
+			entries, err := os.ReadDir(dir)
+			if err != nil {
+				continue // day directory may not exist yet
+			}
+			for _, e := range entries {
+				if strings.HasSuffix(e.Name(), suffix) {
+					matchPaths = append(matchPaths, filepath.Join(dir, e.Name()))
+				}
+			}
+		}
+		if len(matchPaths) == 0 {
+			http.Error(w, "no data for that station/date", http.StatusNotFound)
+			return
+		}
+
+		// Stream response.
+		dlName := filepath.Base(matchPaths[0])
+		w.Header().Set("Content-Type", "text/csv")
+		w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="%s"`, dlName))
+		w.Header().Set("Cache-Control", "no-cache")
+
+		// firstFile tracks whether we have emitted a Grape header yet.
+		// We always emit the header from the first matching file; subsequent
+		// files have their headers stripped so the output is one clean CSV.
+		firstFile := true
+		for _, p := range matchPaths {
+			// Determine the UTC date for this file from its directory path so
+			// we can reconstruct full timestamps for range filtering.
+			fileDay := csvFileDay(p)
+
+			f, err := os.Open(p)
+			if err != nil {
+				continue
+			}
+
+			scanner := bufio.NewScanner(f)
+			pastHeader := false
+			var headerLines []string // buffer header lines until we see "UTC,Freq,Vpk"
+
+			for scanner.Scan() {
+				line := scanner.Text()
+
+				if !pastHeader {
+					if line == "UTC,Freq,Vpk" {
+						pastHeader = true
+						if firstFile {
+							// Emit buffered header + column line.
+							for _, hl := range headerLines {
+								fmt.Fprintln(w, hl)
+							}
+							fmt.Fprintln(w, line)
+							firstFile = false
+						}
+						// Subsequent files: skip their header entirely.
+					} else {
+						if firstFile {
+							headerLines = append(headerLines, line)
+						}
+					}
+					continue
+				}
+
+				// Data row handling.
+				if fullDay {
+					fmt.Fprintln(w, line)
+					continue
+				}
+
+				// Range filtering: parse the HH:MM:SS field and combine with
+				// the file's UTC date to get a full timestamp for comparison.
+				ts, ok := csvRowTime(line, fileDay)
+				if !ok {
+					continue // malformed row — skip
+				}
+				if (ts.Equal(rangeStart) || ts.After(rangeStart)) && ts.Before(rangeEnd) {
+					fmt.Fprintln(w, line)
+				}
+			}
+			f.Close()
+		}
+	})
+
+	// ── Audio info ─────────────────────────────────────────────────────────
+	// GET /api/audio/info?station=<label>
+	// Returns the sample rate and dial frequency for the audio preview stream.
+	// The dial frequency is carrier - 1000 Hz (USB mode); the carrier tone
+	// appears at 1000 Hz in the audio passband.
+	mux.HandleFunc("/api/audio/info", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		label := r.URL.Query().Get("station")
+		if label == "" {
+			http.Error(w, "station parameter required", http.StatusBadRequest)
+			return
+		}
+		var target *DopplerStation
+		for _, ds := range mgr.list() {
+			if ds.cfg.Label == label {
+				target = ds
+				break
+			}
+		}
+		if target == nil {
+			http.Error(w, "station not found", http.StatusNotFound)
+			return
+		}
+		target.streamMu.RLock()
+		sr := target.streamSampleRate
+		target.streamMu.RUnlock()
+		if sr == 0 {
+			sr = 12000
+		}
+		dialFreq := target.cfg.FreqHz - 1000
+		jsonResponse(w, map[string]interface{}{
+			"sample_rate":     sr,
+			"dial_freq_hz":    dialFreq,
+			"carrier_freq_hz": target.cfg.FreqHz,
+			"label":           label,
+		})
+	})
+
+	// ── Audio preview ──────────────────────────────────────────────────────
+	// GET /api/audio/preview?station=<label>
+	// Streams a live WAV audio preview of the station's carrier frequency.
+	// The audio connection is established on demand and dropped when the
+	// client disconnects. Useful for verifying the carrier is receivable.
+	mux.HandleFunc("/api/audio/preview", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		label := r.URL.Query().Get("station")
+		if label == "" {
+			http.Error(w, "station parameter required", http.StatusBadRequest)
+			return
+		}
+		var target *DopplerStation
+		for _, ds := range mgr.list() {
+			if ds.cfg.Label == label {
+				target = ds
+				break
+			}
+		}
+		if target == nil {
+			http.Error(w, "station not found", http.StatusNotFound)
+			return
+		}
+
+		// Get sample rate (default 12000 if not yet known)
+		target.streamMu.RLock()
+		sr := target.streamSampleRate
+		target.streamMu.RUnlock()
+		if sr == 0 {
+			sr = 12000
+		}
+
+		writeStreamingWAVHeader(w, sr, 1)
+		flusher, ok := w.(http.Flusher)
+		if ok {
+			flusher.Flush()
+		}
+
+		audioCh := target.audioHub.subscribe()
+		defer target.audioHub.unsubscribe(audioCh)
+
+		for {
+			select {
+			case <-r.Context().Done():
+				return
+			case chunk, ok := <-audioCh:
+				if !ok {
+					return
+				}
+				if _, err := w.Write(chunk); err != nil {
+					return
+				}
+				if flusher != nil {
+					flusher.Flush()
+				}
+			}
+		}
+	})
+
+	log.Printf("[web] listening on %s (write actions: %s)", addr, func() string {
+		if uiPassword == "" {
+			return "disabled — set UI_PASSWORD"
+		}
+		return "password protected"
+	}())
+	return http.ListenAndServe(addr, mux)
+}
+
+// jsonResponse writes v as JSON with Content-Type application/json.
+func jsonResponse(w http.ResponseWriter, v interface{}) {
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(v); err != nil {
+		log.Printf("[web] json encode: %v", err)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// WAV streaming helpers (for live audio preview)
+// ---------------------------------------------------------------------------
+
+// writeStreamingWAVHeader writes a streaming WAV header with a near-infinite
+// data size so the browser can play it as a live stream.
+func writeStreamingWAVHeader(w http.ResponseWriter, sampleRate, channels int) {
+	const maxSize = 0x7FFFFFFF
+	bitsPerSample := 16
+	byteRate := sampleRate * channels * bitsPerSample / 8
+	blockAlign := channels * bitsPerSample / 8
+	dataSize := uint32(maxSize - 36)
+
+	hdr := make([]byte, 44)
+	copy(hdr[0:4], "RIFF")
+	binary.LittleEndian.PutUint32(hdr[4:], uint32(maxSize))
+	copy(hdr[8:12], "WAVE")
+	copy(hdr[12:16], "fmt ")
+	binary.LittleEndian.PutUint32(hdr[16:], 16)
+	binary.LittleEndian.PutUint16(hdr[20:], 1) // PCM
+	binary.LittleEndian.PutUint16(hdr[22:], uint16(channels))
+	binary.LittleEndian.PutUint32(hdr[24:], uint32(sampleRate))
+	binary.LittleEndian.PutUint32(hdr[28:], uint32(byteRate))
+	binary.LittleEndian.PutUint16(hdr[32:], uint16(blockAlign))
+	binary.LittleEndian.PutUint16(hdr[34:], uint16(bitsPerSample))
+	copy(hdr[36:40], "data")
+	binary.LittleEndian.PutUint32(hdr[40:], dataSize)
+
+	w.Header().Set("Content-Type", "audio/wav")
+	w.Header().Set("Transfer-Encoding", "chunked")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(hdr)
+}
+
+// ---------------------------------------------------------------------------
+// CSV time-range helpers
+// ---------------------------------------------------------------------------
+
+// parseLastDuration parses a "last" query parameter value into a time.Duration.
+// Accepted formats: <N>s (seconds), <N>m (minutes), <N>h (hours).
+// Examples: "15m", "1h", "3600s".
+func parseLastDuration(s string) (time.Duration, error) {
+	if len(s) < 2 {
+		return 0, fmt.Errorf("must be a number followed by s, m, or h (e.g. 15m)")
+	}
+	unit := s[len(s)-1]
+	n, err := strconv.ParseInt(s[:len(s)-1], 10, 64)
+	if err != nil || n <= 0 {
+		return 0, fmt.Errorf("must be a positive integer followed by s, m, or h (e.g. 15m)")
+	}
+	switch unit {
+	case 's':
+		return time.Duration(n) * time.Second, nil
+	case 'm':
+		return time.Duration(n) * time.Minute, nil
+	case 'h':
+		return time.Duration(n) * time.Hour, nil
+	default:
+		return 0, fmt.Errorf("unknown unit %q — use s, m, or h", string(unit))
+	}
+}
+
+// csvFileDay extracts the UTC date from a CSV file path.
+// The path is expected to contain .../YYYY/MM/DD/... directory components.
+// Returns the zero time if the path cannot be parsed.
+func csvFileDay(path string) time.Time {
+	parts := strings.Split(filepath.ToSlash(path), "/")
+	// Walk backwards looking for DD, MM, YYYY components.
+	for i := len(parts) - 2; i >= 2; i-- {
+		dd, err1 := strconv.Atoi(parts[i])
+		mm, err2 := strconv.Atoi(parts[i-1])
+		yyyy, err3 := strconv.Atoi(parts[i-2])
+		if err1 != nil || err2 != nil || err3 != nil {
+			continue
+		}
+		if yyyy < 2000 || yyyy > 2100 || mm < 1 || mm > 12 || dd < 1 || dd > 31 {
+			continue
+		}
+		return time.Date(yyyy, time.Month(mm), dd, 0, 0, 0, 0, time.UTC)
+	}
+	return time.Time{}
+}
+
+// csvRowTime parses the UTC timestamp from a Grape CSV data row.
+// Supports two formats:
+//   - New format (RFC3339):  "2006-01-02T15:04:05Z, freq, vpk"
+//   - Old format (HH:MM:SS): "15:04:05, freq, vpk" — combined with fileDay
+//
+// Returns (time, true) on success, (zero, false) if the row is malformed.
+func csvRowTime(row string, fileDay time.Time) (time.Time, bool) {
+	// The UTC field is the first comma-separated token; trim whitespace.
+	idx := strings.IndexByte(row, ',')
+	if idx < 0 {
+		return time.Time{}, false
+	}
+	field := strings.TrimSpace(row[:idx])
+
+	// Try RFC3339 first (new format).
+	if t, err := time.Parse(time.RFC3339, field); err == nil {
+		return t.UTC(), true
+	}
+
+	// Fall back to legacy HH:MM:SS format — requires fileDay.
+	if fileDay.IsZero() {
+		return time.Time{}, false
+	}
+	t, err := time.Parse("15:04:05", field)
+	if err != nil {
+		return time.Time{}, false
+	}
+	full := time.Date(fileDay.Year(), fileDay.Month(), fileDay.Day(),
+		t.Hour(), t.Minute(), t.Second(), 0, time.UTC)
+	return full, true
+}

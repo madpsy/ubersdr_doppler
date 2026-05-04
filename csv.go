@@ -23,6 +23,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -89,14 +90,14 @@ func (cw *csvWriter) writeReading(cfg stationConfig, r DopplerReading) {
 	}
 
 	// Grape format: UTC,Freq,Vpk
-	// UTC: HH:MM:SS
+	// UTC: full RFC3339 timestamp (2006-01-02T15:04:05Z)
 	// Freq: absolute received frequency in Hz (nominal + doppler)
-	// Vpk: peak voltage amplitude (derived from signal dBFS)
+	// Vpk: peak voltage amplitude (derived from signal dBFS + calibration offset)
 	receivedFreq := float64(cfg.FreqHz) + r.DopplerHz
-	vpk := dbfsToVpk(r.SignalDBFS)
+	vpk := dbfsToVpk(r.SignalDBFS, cw.settings.CalibrationOffsetDB)
 
 	line := fmt.Sprintf("%s, %14.3f, %f\n",
-		r.Timestamp.UTC().Format("15:04:05"),
+		r.Timestamp.UTC().Format("2006-01-02T15:04:05Z"),
 		receivedFreq,
 		vpk,
 	)
@@ -121,13 +122,14 @@ func (cw *csvWriter) write(cfg stationConfig, m MinuteMean, correctedHz *float64
 }
 
 // dbfsToVpk converts a dBFS power level to an approximate peak voltage (0–1 scale).
+// calibrationOffsetDB is added to dBFS before conversion (positive = boost, negative = cut).
 // dBFS 0 = full scale = Vpk 1.0; dBFS -60 = Vpk ~0.001
-func dbfsToVpk(dbfs float32) float32 {
+func dbfsToVpk(dbfs float32, calibrationOffsetDB float64) float32 {
 	if math.IsNaN(float64(dbfs)) || math.IsInf(float64(dbfs), 0) {
 		return 0
 	}
-	// Convert dBFS (power) to linear amplitude: Vpk = 10^(dBFS/20)
-	vpk := math.Pow(10.0, float64(dbfs)/20.0)
+	// Apply calibration offset then convert dBFS to linear amplitude: Vpk = 10^((dBFS+cal)/20)
+	vpk := math.Pow(10.0, (float64(dbfs)+calibrationOffsetDB)/20.0)
 	if vpk > 1.0 {
 		vpk = 1.0
 	}
@@ -158,6 +160,9 @@ func grapeFilename(cfg stationConfig, settings globalSettings, openedAt time.Tim
 }
 
 // grapeHeader builds the # metadata header block for a Grape CSV file.
+// First-line format follows the HamSCI Grape Gen 1 convention:
+//
+//	#,<timestamp>,<node>,<grid>,<lat>,<lon>,<elev>,<location>,G1,<beacon>
 func grapeHeader(cfg stationConfig, settings globalSettings, openedAt time.Time) string {
 	node := settings.NodeNumber
 	if node == "" {
@@ -179,18 +184,28 @@ func grapeHeader(cfg stationConfig, settings globalSettings, openedAt time.Time)
 
 	ts := openedAt.UTC().Format("2006-01-02T15:04:05Z")
 
+	// Format lat/lon/elev for the first line.
+	// Use up to 7 decimal places for lat/lon (sub-metre precision), strip trailing zeros.
+	latStr := strconv.FormatFloat(settings.Latitude, 'f', 7, 64)
+	lonStr := strconv.FormatFloat(settings.Longitude, 'f', 7, 64)
+	elvStr := strconv.FormatFloat(settings.ElevationM, 'f', 1, 64)
+
 	var sb strings.Builder
-	sb.WriteString(fmt.Sprintf("#,%s,%s,%s,,,,UberSDR,G1,%s\n", ts, node, grid, cfg.Label))
+	sb.WriteString(fmt.Sprintf("#,%s,%s,%s,%s,%s,%s,%s,G1,%s\n",
+		ts, node, grid, latStr, lonStr, elvStr, settings.Location, cfg.Label))
 	sb.WriteString("#######################################\n")
 	sb.WriteString("# MetaData for UberSDR Doppler Station\n")
 	sb.WriteString("#\n")
 	sb.WriteString(fmt.Sprintf("# Station Node Number      %s\n", node))
 	sb.WriteString(fmt.Sprintf("# Callsign                 %s\n", callsign))
 	sb.WriteString(fmt.Sprintf("# Grid Square              %s\n", grid))
+	sb.WriteString(fmt.Sprintf("# Lat, Long, Elv           %s, %s, %s\n", latStr, lonStr, elvStr))
+	sb.WriteString(fmt.Sprintf("# City State               %s\n", settings.Location))
 	sb.WriteString(fmt.Sprintf("# Beacon Now Decoded       %s\n", cfg.Label))
 	sb.WriteString(fmt.Sprintf("# Nominal Frequency        %d Hz\n", cfg.FreqHz))
 	sb.WriteString(fmt.Sprintf("# Frequency Standard       %s\n", freqRef))
 	sb.WriteString("# Radio                    UberSDR\n")
+	sb.WriteString("# Radio ID                 G1\n")
 	sb.WriteString("# Software                 ubersdr_doppler (https://github.com/madpsy/ubersdr_doppler)\n")
 	sb.WriteString("#\n")
 	sb.WriteString("#######################################\n")

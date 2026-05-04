@@ -154,6 +154,14 @@ type globalSettings struct {
 	// Register at: https://hamsci.org/grape-node-registration
 	NodeNumber string `json:"node_number"`
 
+	// Physical location of the receiver — written into the Grape CSV header.
+	// Latitude and Longitude in decimal degrees (WGS84). Elevation in metres.
+	// Location is a free-text city/state/country description, e.g. "Macedonia Ohio".
+	Latitude   float64 `json:"latitude"`
+	Longitude  float64 `json:"longitude"`
+	ElevationM float64 `json:"elevation_m"`
+	Location   string  `json:"location"`
+
 	// Frequency reference type — affects CSV quality flag and UI display
 	// Values: "none", "gpsdo", "reference_station"
 	FrequencyReference FrequencyReferenceType `json:"frequency_reference"`
@@ -161,6 +169,12 @@ type globalSettings struct {
 	// Optional description of the reference (for documentation and CSV metadata)
 	// Examples: "Leo Bodnar GPSDO on 10 MHz", "Trimble Thunderbolt", "Leaky 10 MHz OCXO"
 	ReferenceDescription string `json:"reference_description"`
+
+	// CalibrationOffsetDB is added to the raw dBFS signal level before converting to Vpk.
+	// Use this to correct for known system gain/loss (antenna, cable, preamp, SDR gain).
+	// Positive values boost Vpk (system reads lower than true); negative values cut it.
+	// Set to 0 to disable. Typical values: -40 to +40 dB.
+	CalibrationOffsetDB float64 `json:"calibration_offset_db"`
 
 	// ManualOffsetHz is a static frequency correction applied to all station readings.
 	// Use this when you know your hardware clock is off by a fixed amount (e.g. measured

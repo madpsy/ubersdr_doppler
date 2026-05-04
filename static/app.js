@@ -1,9 +1,10 @@
 /* app.js — ubersdr_doppler web UI
  *
- * Three-panel chart layout:
+ * Four-panel chart layout:
  *   Panel 1: Doppler shift (Hz offset) OR absolute received frequency (Hz)
  *   Panel 2: SNR (dB)
  *   Panel 3: Signal power (dBFS)
+ *   Panel 4: Vpk (calibrated peak voltage amplitude, 0–1)
  */
 'use strict';
 
@@ -25,7 +26,10 @@ const state = {
   dopplerChart: null,
   snrChart: null,
   powerChart: null,
-  chartDatasets: {},     // label → {doppler: idx, snr: idx, power: idx}
+  vpkChart: null,
+  chartDatasets: {},     // label → {doppler: idx, snr: idx, power: idx, vpk: idx}
+  calibrationOffsetDB: 0, // from /api/settings — used for Vpk computation in charts
+  showVpk: true,
   historyHours: 24,
   showSNR: true,
   showPower: true,
@@ -241,8 +245,15 @@ async function loadSettings() {
     const s = await r.json();
     document.getElementById('s-callsign').value = s.callsign || '';
     document.getElementById('s-grid').value = s.grid || '';
+    document.getElementById('s-latitude').value = s.latitude ?? '';
+    document.getElementById('s-longitude').value = s.longitude ?? '';
+    document.getElementById('s-elevation').value = s.elevation_m ?? '';
+    document.getElementById('s-location').value = s.location || '';
     const offsetEl = document.getElementById('s-manual-offset');
     if (offsetEl) offsetEl.value = s.manual_offset_hz ?? 0;
+    const calOffsetEl = document.getElementById('s-cal-offset');
+    if (calOffsetEl) calOffsetEl.value = s.calibration_offset_db ?? 0;
+    state.calibrationOffsetDB = s.calibration_offset_db ?? 0;
     document.getElementById('s-freq-ref').value = s.frequency_reference || 'none';
     document.getElementById('s-ref-desc').value = s.reference_description || '';
     updateRefBanner(s.frequency_reference || 'none');
@@ -1341,6 +1352,42 @@ function initCharts() {
       },
     },
   });
+
+  // ── Panel 4: Vpk (calibrated peak voltage amplitude) ─────────────────────
+  const vCtx = document.getElementById('vpk-chart').getContext('2d');
+  state.vpkChart = new Chart(vCtx, {
+    type: 'line',
+    data: { datasets: [] },
+    options: {
+      animation: false,
+      responsive: true,
+      maintainAspectRatio: false,
+      interaction: { mode: 'index', intersect: false },
+      scales: {
+        x: xAxisConfig(true),
+        y: {
+          title: { display: true, text: 'Vpk (amplitude 0–1)', color: '#8b949e', font: { size: 11 } },
+          ticks: { color: '#8b949e' },
+          grid: { color: '#21262d' },
+          min: 0,
+        },
+      },
+      plugins: {
+        legend: { display: false },
+        tooltip: {
+          callbacks: {
+            title: items => {
+              if (!items.length) return '';
+              const raw = items[0].raw;
+              const ts = (raw && raw.x) ? raw.x : new Date(items[0].parsed.x);
+              return new Date(ts).toISOString().slice(11, 19) + ' UTC';
+            },
+            label: ctx => `${ctx.dataset.label}: ${ctx.parsed.y.toFixed(6)}`,
+          },
+        },
+      },
+    },
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -1370,7 +1417,7 @@ function chartWindowRange() {
 /** Apply state.zoomedXMin/Max to all three chart X axes and redraw. */
 function applyChartZoom() {
   const win = chartWindowRange();
-  const charts = [state.dopplerChart, state.snrChart, state.powerChart];
+  const charts = [state.dopplerChart, state.snrChart, state.powerChart, state.vpkChart];
   charts.forEach(c => {
     if (!c) return;
     c.options.scales.x.min = state.zoomedXMin ?? win.min;
@@ -1555,6 +1602,7 @@ async function loadHistory() {
   state.dopplerChart.data.datasets = [];
   state.snrChart.data.datasets = [];
   state.powerChart.data.datasets = [];
+  if (state.vpkChart) state.vpkChart.data.datasets = [];
   state.chartDatasets = {};
 
   for (let i = 0; i < state.stations.length; i++) {
@@ -1587,6 +1635,7 @@ async function loadHistory() {
       const dopplerMaxPoints = [];
       const snrPoints = [];
       const powerPoints = [];
+      const vpkPoints = [];
 
       for (let mi = 0; mi < filtered.length; mi++) {
         const m = filtered[mi];
@@ -1602,6 +1651,7 @@ async function loadHistory() {
             dopplerMaxPoints.push({ x: midTs, y: null });
             snrPoints.push({ x: midTs, y: null });
             powerPoints.push({ x: midTs, y: null });
+            vpkPoints.push({ x: midTs, y: null });
           }
         }
         const hz = (m.corrected_doppler_hz !== null && m.corrected_doppler_hz !== undefined)
@@ -1625,6 +1675,10 @@ async function loadHistory() {
         });
         snrPoints.push({ x: new Date(m.timestamp), y: m.snr_db });
         powerPoints.push({ x: new Date(m.timestamp), y: m.signal_dbfs });
+        const vpkVal = m.signal_dbfs != null
+          ? Math.min(1.0, Math.pow(10, (m.signal_dbfs + state.calibrationOffsetDB) / 20))
+          : null;
+        vpkPoints.push({ x: new Date(m.timestamp), y: vpkVal });
       }
 
       // If the station currently has no valid signal, append a trailing null sentinel
@@ -1640,6 +1694,7 @@ async function loadHistory() {
         dopplerMaxPoints.push({ x: nowTs, y: null });
         snrPoints.push({ x: nowTs, y: null });
         powerPoints.push({ x: nowTs, y: null });
+        vpkPoints.push({ x: nowTs, y: null });
       }
 
       // Push min band (lower boundary), then max band (upper boundary, fills down to min)
@@ -1684,7 +1739,16 @@ async function loadHistory() {
         borderWidth: 1, pointRadius: 0, tension: 0.15, spanGaps: false,
       });
 
-      state.chartDatasets[label] = { doppler: dIdx, dMin: dMinIdx, dMax: dMaxIdx, snr: sIdx, power: pIdx };
+      const vIdx = state.vpkChart ? state.vpkChart.data.datasets.length : 0;
+      if (state.vpkChart) {
+        state.vpkChart.data.datasets.push({
+          label, data: vpkPoints,
+          borderColor: colour, backgroundColor: colour + '22', fill: true,
+          borderWidth: 1, pointRadius: 0, tension: 0.15, spanGaps: false,
+        });
+      }
+
+      state.chartDatasets[label] = { doppler: dIdx, dMin: dMinIdx, dMax: dMaxIdx, snr: sIdx, power: pIdx, vpk: vIdx };
     } catch (e) {
       console.warn('history load failed for', label, e);
     }
@@ -1737,15 +1801,23 @@ function appendLivePoint(label, reading) {
       label, data: [], borderColor: colour, backgroundColor: colour + '22',
       fill: true, borderWidth: 1, pointRadius: 0, tension: 0.15, spanGaps: false,
     });
-    state.chartDatasets[label] = { doppler: dIdx, dMin: dMinIdx, dMax: dMaxIdx, snr: sIdx, power: pIdx };
+    const vIdx = state.vpkChart ? state.vpkChart.data.datasets.length : 0;
+    if (state.vpkChart) {
+      state.vpkChart.data.datasets.push({
+        label, data: [], borderColor: colour, backgroundColor: colour + '22',
+        fill: true, borderWidth: 1, pointRadius: 0, tension: 0.15, spanGaps: false,
+      });
+    }
+    state.chartDatasets[label] = { doppler: dIdx, dMin: dMinIdx, dMax: dMaxIdx, snr: sIdx, power: pIdx, vpk: vIdx };
   }
 
-  const { doppler: dIdx, dMin: dMinIdx, dMax: dMaxIdx, snr: sIdx, power: pIdx } = state.chartDatasets[label];
+  const { doppler: dIdx, dMin: dMinIdx, dMax: dMaxIdx, snr: sIdx, power: pIdx, vpk: vIdx } = state.chartDatasets[label];
   const dDs    = state.dopplerChart.data.datasets[dIdx];
   const dMinDs = dMinIdx !== undefined ? state.dopplerChart.data.datasets[dMinIdx] : null;
   const dMaxDs = dMaxIdx !== undefined ? state.dopplerChart.data.datasets[dMaxIdx] : null;
   const sDs    = state.snrChart.data.datasets[sIdx];
   const pDs    = state.powerChart.data.datasets[pIdx];
+  const vDs    = (state.vpkChart && vIdx !== undefined) ? state.vpkChart.data.datasets[vIdx] : null;
 
   // Use corrected Doppler when available (reference station offset applied)
   const dHz = (reading.corrected_doppler_hz !== null && reading.corrected_doppler_hz !== undefined)
@@ -1763,6 +1835,7 @@ function appendLivePoint(label, reading) {
       if (dMaxDs) dMaxDs.data.push({ x: ts, y: null });
       sDs.data.push({ x: ts, y: null });
       pDs.data.push({ x: ts, y: null });
+      if (vDs) vDs.data.push({ x: ts, y: null });
     }
   } else {
     const yVal = dopplerToY(dHz, nominalHz);
@@ -1772,6 +1845,12 @@ function appendLivePoint(label, reading) {
     if (dMaxDs) dMaxDs.data.push({ x: ts, y: yVal });
     sDs.data.push({ x: ts, y: reading.snr_db });
     pDs.data.push({ x: ts, y: reading.signal_dbfs });
+    if (vDs) {
+      const vpkLive = reading.signal_dbfs != null
+        ? Math.min(1.0, Math.pow(10, (reading.signal_dbfs + state.calibrationOffsetDB) / 20))
+        : null;
+      vDs.data.push({ x: ts, y: vpkLive });
+    }
   }
 
   const trimDs = ds => {
@@ -1781,10 +1860,12 @@ function appendLivePoint(label, reading) {
   if (dMinDs) trimDs(dMinDs);
   if (dMaxDs) trimDs(dMaxDs);
   trimDs(sDs); trimDs(pDs);
+  if (vDs) trimDs(vDs);
 
   state.dopplerChart.update('none');
   state.snrChart.update('none');
   state.powerChart.update('none');
+  if (state.vpkChart) state.vpkChart.update('none');
 }
 
 // ---------------------------------------------------------------------------
@@ -2175,13 +2256,14 @@ document.addEventListener('DOMContentLoaded', async () => {
   initCharts();
   if (typeof DopplerMap !== 'undefined') DopplerMap.init();
 
-  // Attach zoom/pan handlers to all three chart canvases.
+  // Attach zoom/pan handlers to all four chart canvases.
   // Scroll-wheel and drag-box zoom are wired to the doppler chart;
-  // double-click reset is wired to all three.
+  // double-click reset is wired to all four.
   [
     { id: 'doppler-chart', chart: () => state.dopplerChart, full: true },
     { id: 'snr-chart',     chart: () => state.snrChart,     full: false },
     { id: 'power-chart',   chart: () => state.powerChart,   full: false },
+    { id: 'vpk-chart',     chart: () => state.vpkChart,     full: false },
   ].forEach(({ id, chart, full }) => {
     const canvas = document.getElementById(id);
     if (!canvas) return;
@@ -2331,7 +2413,12 @@ document.addEventListener('DOMContentLoaded', async () => {
       const s = {
         callsign:              document.getElementById('s-callsign').value.trim(),
         grid:                  document.getElementById('s-grid').value.trim(),
+        latitude:              parseFloat(document.getElementById('s-latitude').value) || 0,
+        longitude:             parseFloat(document.getElementById('s-longitude').value) || 0,
+        elevation_m:           parseFloat(document.getElementById('s-elevation').value) || 0,
+        location:              document.getElementById('s-location').value.trim(),
         manual_offset_hz:      offsetEl ? parseFloat(offsetEl.value) || 0 : 0,
+        calibration_offset_db: parseFloat(document.getElementById('s-cal-offset')?.value) || 0,
         frequency_reference:   document.getElementById('s-freq-ref').value,
         reference_description: document.getElementById('s-ref-desc').value.trim(),
       };
@@ -2418,6 +2505,16 @@ document.addEventListener('DOMContentLoaded', async () => {
       state.showPower = e.target.checked;
       const wrap = document.getElementById('power-chart-wrap');
       if (wrap) wrap.style.display = state.showPower ? '' : 'none';
+    });
+  }
+
+  // ── Vpk chart toggle ─────────────────────────────────────────────────────
+  const showVpkEl = document.getElementById('show-vpk-chart');
+  if (showVpkEl) {
+    showVpkEl.addEventListener('change', e => {
+      state.showVpk = e.target.checked;
+      const wrap = document.getElementById('vpk-chart-wrap');
+      if (wrap) wrap.style.display = state.showVpk ? '' : 'none';
     });
   }
 
@@ -2536,6 +2633,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       { id: 'doppler-chart', wrap: null },
       { id: 'snr-chart',     wrap: 'snr-chart-wrap' },
       { id: 'power-chart',   wrap: 'power-chart-wrap' },
+      { id: 'vpk-chart',     wrap: 'vpk-chart-wrap' },
     ];
     const canvases = panels
       .filter(p => !p.wrap || document.getElementById(p.wrap).style.display !== 'none')
