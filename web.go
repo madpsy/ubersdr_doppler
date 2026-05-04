@@ -238,6 +238,9 @@ func startHTTPServer(
 	settingsMu *sync.RWMutex,
 	cw *csvWriter,
 	uiPassword string,
+	ftpCfg *ftpSettings,
+	ftpMu *sync.RWMutex,
+	ftpCfgPath string,
 ) error {
 	sessions := newSessionStore()
 	mux := http.NewServeMux()
@@ -966,6 +969,9 @@ func startHTTPServer(
 			}
 		}
 	})
+
+	// ── FTP settings endpoints (all auth-gated) ────────────────────────────
+	registerFTPHandlers(mux, ftpCfg, ftpMu, ftpCfgPath, uiPassword, sessions)
 
 	log.Printf("[web] listening on %s (write actions: %s)", addr, func() string {
 		if uiPassword == "" {

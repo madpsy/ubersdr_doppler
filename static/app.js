@@ -214,6 +214,13 @@ function updateAuthUI() {
     });
   }
   // Station edit/remove buttons are rendered dynamically in renderStationList()
+
+  // FTP section: only visible when authenticated (credentials must stay hidden)
+  const ftpSection = document.getElementById('ftp-section');
+  if (ftpSection) {
+    ftpSection.style.display = authenticated ? '' : 'none';
+    if (authenticated) loadFTPSettings();
+  }
 }
 
 function openLoginModal() {
@@ -262,6 +269,31 @@ async function loadSettings() {
   }
 }
 
+// ---------------------------------------------------------------------------
+// FTP settings
+// ---------------------------------------------------------------------------
+async function loadFTPSettings() {
+  try {
+    const r = await apiFetch('/api/ftp/settings');
+    if (!r.ok) return;
+    const s = await r.json();
+    document.getElementById('ftp-host').value        = s.host        || '';
+    document.getElementById('ftp-username').value    = s.username    || '';
+    document.getElementById('ftp-password').value    = s.password    || '';
+    document.getElementById('ftp-remote-path').value = s.remote_path || '';
+    const intervalEl = document.getElementById('ftp-interval');
+    if (intervalEl) intervalEl.value = String(s.interval_mins || 15);
+    const windowEl = document.getElementById('ftp-window');
+    if (windowEl) windowEl.value = String(s.window_mins || 15);
+    const tlsEl = document.getElementById('ftp-tls');
+    if (tlsEl) tlsEl.checked = !!s.tls;
+    const enabledEl = document.getElementById('ftp-enabled');
+    if (enabledEl) enabledEl.checked = !!s.enabled;
+  } catch (e) {
+    console.warn('FTP settings load failed', e);
+  }
+}
+
 function updateRefBanner(freqRef) {
   const el = document.getElementById('ref-quality-banner');
   if (!el) return;
@@ -284,6 +316,14 @@ function updateRefBanner(freqRef) {
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+function escapeHtml(str) {
+  return String(str)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+}
+
 function fmtHz(hz) {
   if (Math.abs(hz) >= 1e6) return (hz / 1e6).toFixed(3) + ' MHz';
   if (Math.abs(hz) >= 1e3) return (hz / 1e3).toFixed(3) + ' kHz';
@@ -2440,6 +2480,124 @@ document.addEventListener('DOMContentLoaded', async () => {
     });
     document.getElementById('s-freq-ref').addEventListener('change', e => {
       updateRefBanner(e.target.value);
+    });
+  }
+
+  // ── FTP settings form ────────────────────────────────────────────────────
+  const ftpForm = document.getElementById('ftp-form');
+  if (ftpForm) {
+    ftpForm.addEventListener('submit', async e => {
+      e.preventDefault();
+      const cfg = {
+        host:          document.getElementById('ftp-host').value.trim(),
+        username:      document.getElementById('ftp-username').value.trim(),
+        password:      document.getElementById('ftp-password').value,
+        remote_path:   document.getElementById('ftp-remote-path').value.trim(),
+        interval_mins: parseInt(document.getElementById('ftp-interval').value, 10) || 15,
+        window_mins:   parseInt(document.getElementById('ftp-window').value, 10)   || 15,
+        tls:           document.getElementById('ftp-tls').checked,
+        enabled:       document.getElementById('ftp-enabled').checked,
+      };
+      try {
+        await apiFetch('/api/ftp/settings', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(cfg),
+        });
+        const saved = document.getElementById('ftp-saved');
+        if (saved) {
+          saved.style.display = 'inline';
+          setTimeout(() => { saved.style.display = 'none'; }, 3000);
+        }
+      } catch (err) {
+        alert('Error saving FTP settings: ' + err.message);
+      }
+    });
+  }
+
+  // ── FTP password show/hide toggle ────────────────────────────────────────
+  const ftpPwToggle = document.getElementById('ftp-pw-toggle');
+  if (ftpPwToggle) {
+    ftpPwToggle.addEventListener('click', () => {
+      const pwInput = document.getElementById('ftp-password');
+      const showing = pwInput.type === 'text';
+      pwInput.type = showing ? 'password' : 'text';
+      ftpPwToggle.textContent = showing ? '👁' : '🙈';
+      ftpPwToggle.setAttribute('aria-label', showing ? 'Show password' : 'Hide password');
+    });
+  }
+
+  // ── FTP test button ──────────────────────────────────────────────────────
+  const ftpTestBtn = document.getElementById('ftp-test-btn');
+  if (ftpTestBtn) {
+    ftpTestBtn.addEventListener('click', async () => {
+      const panel  = document.getElementById('ftp-test-panel');
+      const logEl  = document.getElementById('ftp-test-log');
+      if (!panel || !logEl) return;
+
+      // Build config from current form values (not saved settings)
+      const cfg = {
+        host:          document.getElementById('ftp-host').value.trim(),
+        username:      document.getElementById('ftp-username').value.trim(),
+        password:      document.getElementById('ftp-password').value,
+        remote_path:   document.getElementById('ftp-remote-path').value.trim(),
+        interval_mins: parseInt(document.getElementById('ftp-interval').value, 10) || 15,
+        window_mins:   parseInt(document.getElementById('ftp-window').value, 10)   || 15,
+        tls:           document.getElementById('ftp-tls').checked,
+        enabled:       document.getElementById('ftp-enabled').checked,
+      };
+
+      // Show panel and clear previous results
+      panel.style.display = '';
+      logEl.innerHTML = '';
+      ftpTestBtn.disabled = true;
+      ftpTestBtn.textContent = '⏳ Testing…';
+
+      // Add a "running" placeholder row
+      const addRow = (step) => {
+        const row = document.createElement('div');
+        row.className = 'ftp-log-row ftp-log-running';
+        row.innerHTML = `<span class="ftp-log-step">${escapeHtml(step.name)}</span>`
+                      + `<span class="ftp-log-status">…</span>`
+                      + `<span class="ftp-log-msg"></span>`;
+        logEl.appendChild(row);
+        return row;
+      };
+
+      try {
+        const r = await apiFetch('/api/ftp/test', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(cfg),
+        });
+        const result = await r.json();
+
+        logEl.innerHTML = '';
+        for (const step of (result.steps || [])) {
+          const row = document.createElement('div');
+          const cls = step.ok ? 'ftp-log-ok' : (step.skipped ? 'ftp-log-skip' : 'ftp-log-err');
+          row.className = `ftp-log-row ${cls}`;
+          const icon = step.ok ? '✓' : (step.skipped ? '–' : '✗');
+          row.innerHTML = `<span class="ftp-log-icon">${icon}</span>`
+                        + `<span class="ftp-log-step">${escapeHtml(step.name)}</span>`
+                        + `<span class="ftp-log-msg">${escapeHtml(step.message || '')}</span>`;
+          logEl.appendChild(row);
+        }
+        // Summary row
+        const summary = document.createElement('div');
+        summary.className = `ftp-log-summary ${result.success ? 'ftp-log-ok' : 'ftp-log-err'}`;
+        summary.textContent = result.success ? '✓ Connection test passed' : `✗ Test failed: ${result.error || 'unknown error'}`;
+        logEl.appendChild(summary);
+      } catch (err) {
+        logEl.innerHTML = '';
+        const row = document.createElement('div');
+        row.className = 'ftp-log-row ftp-log-err';
+        row.textContent = '✗ Request failed: ' + err.message;
+        logEl.appendChild(row);
+      } finally {
+        ftpTestBtn.disabled = false;
+        ftpTestBtn.textContent = '🔌 Test Connection';
+      }
     });
   }
 

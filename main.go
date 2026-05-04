@@ -94,15 +94,32 @@ func main() {
 	mgr := newStationManager(*ubersdrURL, *dataDir, hub, cw)
 	mgr.load()
 
+	// Load FTP settings (separate file — credentials must not appear in /api/settings)
+	ftpCfgPath := *dataDir + "/ftp_settings.json"
+	ftpCfg, err := loadFTPSettings(ftpCfgPath)
+	if err != nil {
+		log.Printf("[main] warning: could not load ftp_settings.json: %v — using defaults", err)
+	}
+	var ftpMu sync.RWMutex
+	if ftpCfg.Enabled {
+		log.Printf("[main] FTP upload: enabled — host=%s interval=%dm window=%dm",
+			ftpCfg.Host, ftpCfg.IntervalMins, ftpCfg.WindowMins)
+	} else {
+		log.Printf("[main] FTP upload: disabled (configure via Settings → FTP Upload)")
+	}
+
 	// HTTP server
 	go func() {
-		if err := startHTTPServer(*listenAddr, mgr, hub, settingsPath, &settings, &settingsMu, cw, *uiPassword); err != nil {
+		if err := startHTTPServer(*listenAddr, mgr, hub, settingsPath, &settings, &settingsMu, cw, *uiPassword, &ftpCfg, &ftpMu, ftpCfgPath); err != nil {
 			log.Fatalf("[main] HTTP server: %v", err)
 		}
 	}()
 
 	// Start all loaded stations
 	mgr.startAll(ctx)
+
+	// FTP uploader goroutine — runs independently, re-reads config on each tick
+	go startFTPUploader(ctx, mgr, &ftpCfg, &ftpMu, &settings, &settingsMu, ftpCfgPath)
 
 	// Wait for SIGINT / SIGTERM
 	sig := make(chan os.Signal, 1)

@@ -404,6 +404,83 @@
       </form>
     </section>
 
+    <!-- FTP Upload Settings (only rendered when authenticated) -->
+    <section id="ftp-section" style="display:none">
+      <h2>FTP Upload</h2>
+      <p class="chart-hint" style="margin-bottom:14px">
+        Automatically upload a preview CSV for every station at a regular interval.
+        The file covers the configured window of recent data and is named with the time span,
+        e.g. <code>2026-05-04T18:00:00Z_2026-05-04T18:15:00Z_N00001_IO91wm_FRQ_WWV10.csv</code>.
+        Uploads are aligned to clock boundaries (e.g. :00, :15, :30, :45 UTC).
+      </p>
+      <form id="ftp-form">
+        <div class="form-row">
+          <label>FTP Host
+            <input type="text" id="ftp-host" placeholder="ftp.example.com:21">
+            <span class="field-hint">Hostname and port, e.g. ftp.example.com:21</span>
+          </label>
+          <label>Username
+            <input type="text" id="ftp-username" placeholder="username" autocomplete="off">
+          </label>
+        </div>
+        <div class="form-row">
+          <label>Password
+            <div class="password-input-wrap">
+              <input type="password" id="ftp-password" placeholder="password" autocomplete="new-password">
+              <button type="button" id="ftp-pw-toggle" class="btn-pw-toggle" title="Show/hide password" aria-label="Show password">👁</button>
+            </div>
+          </label>
+          <label>Remote Path
+            <input type="text" id="ftp-remote-path" placeholder="/uploads/doppler">
+            <span class="field-hint">Directory on the FTP server (leave empty for root)</span>
+          </label>
+        </div>
+        <div class="form-row">
+          <label>Upload Interval
+            <select id="ftp-interval">
+              <option value="1">Every 1 minute</option>
+              <option value="5">Every 5 minutes</option>
+              <option value="10">Every 10 minutes</option>
+              <option value="15" selected>Every 15 minutes</option>
+              <option value="30">Every 30 minutes</option>
+              <option value="60">Every 60 minutes</option>
+            </select>
+            <span class="field-hint">Uploads align to clock boundaries (e.g. :00, :15, :30, :45)</span>
+          </label>
+          <label>Data Window
+            <select id="ftp-window">
+              <option value="1">Last 1 minute</option>
+              <option value="5">Last 5 minutes</option>
+              <option value="10">Last 10 minutes</option>
+              <option value="15" selected>Last 15 minutes</option>
+              <option value="30">Last 30 minutes</option>
+              <option value="60">Last 60 minutes</option>
+            </select>
+            <span class="field-hint">Time span of data included in each uploaded CSV</span>
+          </label>
+        </div>
+        <div class="form-row">
+          <label class="checkbox-label">
+            <input type="checkbox" id="ftp-tls"> Use FTPS (explicit TLS / AUTH TLS)
+          </label>
+          <label class="checkbox-label">
+            <input type="checkbox" id="ftp-enabled"> Enable automatic FTP upload
+          </label>
+        </div>
+        <div class="form-actions" style="justify-content:flex-start;gap:12px;flex-wrap:wrap">
+          <button type="submit" class="btn btn-primary">Save FTP Settings</button>
+          <button type="button" id="ftp-test-btn" class="btn btn-secondary">🔌 Test Connection</button>
+          <span id="ftp-saved" style="color:var(--green);display:none;align-self:center">✓ Saved</span>
+        </div>
+      </form>
+
+      <!-- Test connection log panel -->
+      <div id="ftp-test-panel" style="display:none;margin-top:16px">
+        <div style="font-size:0.78rem;font-weight:600;color:var(--muted);text-transform:uppercase;letter-spacing:0.05em;margin-bottom:8px">Connection Test Log</div>
+        <div id="ftp-test-log" class="ftp-test-log"></div>
+      </div>
+    </section>
+
     <!-- CSV download -->
     <section id="download-section">
       <h2>Download CSV</h2>
