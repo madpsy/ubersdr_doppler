@@ -19,6 +19,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -668,240 +669,107 @@ func startHTTPServer(
 	})
 
 	// ── CSV download ───────────────────────────────────────────────────────
+	// GET /api/csv?station=<label>&date=YYYY-MM-DD
+	//   Full-day download (original behaviour — unchanged).
+	//
+	// GET /api/csv?station=<label>&last=<duration>
+	//   Download the last <duration> of 1-second data.
+	//   Accepted units: s (seconds), m (minutes), h (hours).
+	//   Examples: last=15m  last=1h  last=3600s
+	//
+	// GET /api/csv?station=<label>&start=<RFC3339>[&end=<RFC3339>]
+	//   Download data between two absolute UTC timestamps.
+	//   end defaults to now when omitted.
+	//
+	// All forms return Grape-format CSV identical to the full-day download
+	// (same # metadata header + UTC,Freq,Vpk data rows).
 	mux.HandleFunc("/api/csv", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
 		label := r.URL.Query().Get("station")
-		date := r.URL.Query().Get("date")
-		if label == "" || date == "" {
-			http.Error(w, "station and date parameters required", http.StatusBadRequest)
-			return
-		}
-		t, err := time.Parse("2006-01-02", date)
-		if err != nil {
-			http.Error(w, "invalid date format (use YYYY-MM-DD)", http.StatusBadRequest)
+		if label == "" {
+			http.Error(w, "station parameter required", http.StatusBadRequest)
 			return
 		}
 		if strings.ContainsAny(label, "/\\.") {
 			http.Error(w, "invalid station label", http.StatusBadRequest)
 			return
 		}
-		// Find all Grape-format CSV files for this station/date.
-		// Each app restart creates a new timestamped file, so there may be
-		// multiple files per day — collect them all, sorted by name (which
-		// sorts chronologically since the timestamp is the filename prefix).
-		dir := filepath.Join(mgr.dataDir,
-			fmt.Sprintf("%04d", t.Year()),
-			fmt.Sprintf("%02d", t.Month()),
-			fmt.Sprintf("%02d", t.Day()),
-		)
-		entries, err := os.ReadDir(dir)
-		if err != nil {
-			http.Error(w, "no data for that station/date", http.StatusNotFound)
-			return
-		}
-		suffix := "_FRQ_" + label + ".csv"
-		var matchPaths []string
-		for _, e := range entries {
-			if strings.HasSuffix(e.Name(), suffix) {
-				matchPaths = append(matchPaths, filepath.Join(dir, e.Name()))
-			}
-		}
-		if len(matchPaths) == 0 {
-			http.Error(w, "no data for that station/date", http.StatusNotFound)
-			return
-		}
-		// os.ReadDir returns entries in directory order (alphabetical), which
-		// is chronological for our timestamp-prefixed filenames.
-		// Build a synthetic download filename from the first file's name but
-		// strip the open-time timestamp so it represents the whole day.
-		dlName := filepath.Base(matchPaths[0])
-		w.Header().Set("Content-Type", "text/csv")
-		w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="%s"`, dlName))
-		w.Header().Set("Cache-Control", "no-cache")
-		// Stream all matching files in order. For the first file emit everything;
-		// for subsequent files skip the header lines (lines starting with '#'
-		// and the "UTC,Freq,Vpk" column header) so the download is one clean CSV.
-		for i, p := range matchPaths {
-			f, err := os.Open(p)
+
+		q := r.URL.Query()
+		dateStr := q.Get("date")
+		lastStr := q.Get("last")
+		startStr := q.Get("start")
+		endStr := q.Get("end")
+
+		// ── Determine the time window ──────────────────────────────────────
+		// rangeStart/rangeEnd are used for row-level filtering when fullDay is false.
+		var rangeStart, rangeEnd time.Time
+		var fullDay bool
+
+		switch {
+		case dateStr != "" && lastStr == "" && startStr == "" && endStr == "":
+			// Legacy full-day mode — no row filtering needed.
+			fullDay = true
+
+		case lastStr != "":
+			// Relative window: last=15m / last=1h / last=3600s
+			dur, err := parseLastDuration(lastStr)
 			if err != nil {
-				continue
-			}
-			if i == 0 {
-				// First file: stream verbatim
-				io.Copy(w, f) //nolint:errcheck
-			} else {
-				// Subsequent files: skip header lines
-				scanner := bufio.NewScanner(f)
-				pastHeader := false
-				for scanner.Scan() {
-					line := scanner.Text()
-					if !pastHeader {
-						if line == "UTC,Freq,Vpk" {
-							pastHeader = true
-						}
-						continue
-					}
-					fmt.Fprintln(w, line)
-				}
-			}
-			f.Close()
-		}
-	})
-
-	// ── Audio info ─────────────────────────────────────────────────────────
-	// GET /api/audio/info?station=<label>
-	// Returns the sample rate and dial frequency for the audio preview stream.
-	// The dial frequency is carrier - 1000 Hz (USB mode); the carrier tone
-	// appears at 1000 Hz in the audio passband.
-	mux.HandleFunc("/api/audio/info", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodGet {
-			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-			return
-		}
-		label := r.URL.Query().Get("station")
-		if label == "" {
-			http.Error(w, "station parameter required", http.StatusBadRequest)
-			return
-		}
-		var target *DopplerStation
-		for _, ds := range mgr.list() {
-			if ds.cfg.Label == label {
-				target = ds
-				break
-			}
-		}
-		if target == nil {
-			http.Error(w, "station not found", http.StatusNotFound)
-			return
-		}
-		target.streamMu.RLock()
-		sr := target.streamSampleRate
-		target.streamMu.RUnlock()
-		if sr == 0 {
-			sr = 12000
-		}
-		dialFreq := target.cfg.FreqHz - 1000
-		jsonResponse(w, map[string]interface{}{
-			"sample_rate":     sr,
-			"dial_freq_hz":    dialFreq,
-			"carrier_freq_hz": target.cfg.FreqHz,
-			"label":           label,
-		})
-	})
-
-	// ── Audio preview ──────────────────────────────────────────────────────
-	// GET /api/audio/preview?station=<label>
-	// Streams a live WAV audio preview of the station's carrier frequency.
-	// The audio connection is established on demand and dropped when the
-	// client disconnects. Useful for verifying the carrier is receivable.
-	mux.HandleFunc("/api/audio/preview", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodGet {
-			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-			return
-		}
-		label := r.URL.Query().Get("station")
-		if label == "" {
-			http.Error(w, "station parameter required", http.StatusBadRequest)
-			return
-		}
-		var target *DopplerStation
-		for _, ds := range mgr.list() {
-			if ds.cfg.Label == label {
-				target = ds
-				break
-			}
-		}
-		if target == nil {
-			http.Error(w, "station not found", http.StatusNotFound)
-			return
-		}
-
-		// Get sample rate (default 12000 if not yet known)
-		target.streamMu.RLock()
-		sr := target.streamSampleRate
-		target.streamMu.RUnlock()
-		if sr == 0 {
-			sr = 12000
-		}
-
-		writeStreamingWAVHeader(w, sr, 1)
-		flusher, ok := w.(http.Flusher)
-		if ok {
-			flusher.Flush()
-		}
-
-		audioCh := target.audioHub.subscribe()
-		defer target.audioHub.unsubscribe(audioCh)
-
-		for {
-			select {
-			case <-r.Context().Done():
+				http.Error(w, "invalid last parameter: "+err.Error(), http.StatusBadRequest)
 				return
-			case chunk, ok := <-audioCh:
-				if !ok {
+			}
+			rangeEnd = time.Now().UTC()
+			rangeStart = rangeEnd.Add(-dur)
+
+		case startStr != "":
+			// Absolute window.
+			var err error
+			rangeStart, err = time.Parse(time.RFC3339, startStr)
+			if err != nil {
+				http.Error(w, "invalid start (use RFC3339, e.g. 2006-01-02T15:04:05Z)", http.StatusBadRequest)
+				return
+			}
+			rangeStart = rangeStart.UTC()
+			if endStr != "" {
+				rangeEnd, err = time.Parse(time.RFC3339, endStr)
+				if err != nil {
+					http.Error(w, "invalid end (use RFC3339)", http.StatusBadRequest)
 					return
 				}
-				if _, err := w.Write(chunk); err != nil {
-					return
-				}
-				if flusher != nil {
-					flusher.Flush()
-				}
+				rangeEnd = rangeEnd.UTC()
+			} else {
+				rangeEnd = time.Now().UTC()
+			}
+			if !rangeEnd.After(rangeStart) {
+				http.Error(w, "end must be after start", http.StatusBadRequest)
+				return
+			}
+
+		default:
+			http.Error(w, "provide date, last, or start/end parameters", http.StatusBadRequest)
+			return
+		}
+
+		// ── Collect the set of UTC days we need to read ────────────────────
+		var days []time.Time
+		if fullDay {
+			t, err := time.Parse("2006-01-02", dateStr)
+			if err != nil {
+				http.Error(w, "invalid date format (use YYYY-MM-DD)", http.StatusBadRequest)
+				return
+			}
+			days = []time.Time{t.UTC()}
+		} else {
+			// The window may span midnight, so include every UTC day it touches.
+			d := time.Date(rangeStart.Year(), rangeStart.Month(), rangeStart.Day(), 0, 0, 0, 0, time.UTC)
+			endDay := time.Date(rangeEnd.Year(), rangeEnd.Month(), rangeEnd.Day(), 0, 0, 0, 0, time.UTC)
+			for !d.After(endDay) {
+				days = append(days, d)
+				d = d.Add(24 * time.Hour)
 			}
 		}
-	})
 
-	log.Printf("[web] listening on %s (write actions: %s)", addr, func() string {
-		if uiPassword == "" {
-			return "disabled — set UI_PASSWORD"
-		}
-		return "password protected"
-	}())
-	return http.ListenAndServe(addr, mux)
-}
-
-// jsonResponse writes v as JSON with Content-Type application/json.
-func jsonResponse(w http.ResponseWriter, v interface{}) {
-	w.Header().Set("Content-Type", "application/json")
-	if err := json.NewEncoder(w).Encode(v); err != nil {
-		log.Printf("[web] json encode: %v", err)
-	}
-}
-
-// ---------------------------------------------------------------------------
-// WAV streaming helpers (for live audio preview)
-// ---------------------------------------------------------------------------
-
-// writeStreamingWAVHeader writes a streaming WAV header with a near-infinite
-// data size so the browser can play it as a live stream.
-func writeStreamingWAVHeader(w http.ResponseWriter, sampleRate, channels int) {
-	const maxSize = 0x7FFFFFFF
-	bitsPerSample := 16
-	byteRate := sampleRate * channels * bitsPerSample / 8
-	blockAlign := channels * bitsPerSample / 8
-	dataSize := uint32(maxSize - 36)
-
-	hdr := make([]byte, 44)
-	copy(hdr[0:4], "RIFF")
-	binary.LittleEndian.PutUint32(hdr[4:], uint32(maxSize))
-	copy(hdr[8:12], "WAVE")
-	copy(hdr[12:16], "fmt ")
-	binary.LittleEndian.PutUint32(hdr[16:], 16)
-	binary.LittleEndian.PutUint16(hdr[20:], 1) // PCM
-	binary.LittleEndian.PutUint16(hdr[22:], uint16(channels))
-	binary.LittleEndian.PutUint32(hdr[24:], uint32(sampleRate))
-	binary.LittleEndian.PutUint32(hdr[28:], uint32(byteRate))
-	binary.LittleEndian.PutUint16(hdr[32:], uint16(blockAlign))
-	binary.LittleEndian.PutUint16(hdr[34:], uint16(bitsPerSample))
-	copy(hdr[36:40], "data")
-	binary.LittleEndian.PutUint32(hdr[40:], dataSize)
-
-	w.Header().Set("Content-Type", "audio/wav")
-	w.Header().Set("Transfer-Encoding", "chunked")
-	w.Header().Set("Cache-Control", "no-cache")
-	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write(hdr)
-}
+		// ── Gather matching CSV file paths across
