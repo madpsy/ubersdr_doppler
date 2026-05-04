@@ -16,8 +16,11 @@ type ftpSettings struct {
 	// Enabled controls whether the periodic FTP upload goroutine is active.
 	Enabled bool `json:"enabled"`
 
-	// Host is the FTP server address including port, e.g. "ftp.example.com:21".
+	// Host is the FTP server hostname or IP, e.g. "ftp.example.com".
 	Host string `json:"host"`
+
+	// Port is the FTP server port. Default: 21.
+	Port int `json:"port"`
 
 	// Username and Password for FTP authentication.
 	Username string `json:"username"`
@@ -44,6 +47,7 @@ type ftpSettings struct {
 func defaultFTPSettings() ftpSettings {
 	return ftpSettings{
 		Enabled:      false,
+		Port:         21,
 		IntervalMins: 15,
 		WindowMins:   15,
 		TLS:          false,
@@ -64,6 +68,9 @@ func loadFTPSettings(path string) (ftpSettings, error) {
 		return defaultFTPSettings(), err
 	}
 	// Apply defaults for zero values
+	if s.Port <= 0 {
+		s.Port = 21
+	}
 	if s.IntervalMins <= 0 {
 		s.IntervalMins = 15
 	}

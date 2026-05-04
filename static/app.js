@@ -278,6 +278,7 @@ async function loadFTPSettings() {
     if (!r.ok) return;
     const s = await r.json();
     document.getElementById('ftp-host').value        = s.host        || '';
+    document.getElementById('ftp-port').value        = s.port        || 21;
     document.getElementById('ftp-username').value    = s.username    || '';
     document.getElementById('ftp-password').value    = s.password    || '';
     document.getElementById('ftp-remote-path').value = s.remote_path || '';
@@ -2490,6 +2491,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       e.preventDefault();
       const cfg = {
         host:          document.getElementById('ftp-host').value.trim(),
+        port:          parseInt(document.getElementById('ftp-port').value, 10) || 21,
         username:      document.getElementById('ftp-username').value.trim(),
         password:      document.getElementById('ftp-password').value,
         remote_path:   document.getElementById('ftp-remote-path').value.trim(),
@@ -2538,6 +2540,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       // Build config from current form values (not saved settings)
       const cfg = {
         host:          document.getElementById('ftp-host').value.trim(),
+        port:          parseInt(document.getElementById('ftp-port').value, 10) || 21,
         username:      document.getElementById('ftp-username').value.trim(),
         password:      document.getElementById('ftp-password').value,
         remote_path:   document.getElementById('ftp-remote-path').value.trim(),

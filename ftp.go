@@ -66,7 +66,12 @@ func testFTPConnection(cfg ftpSettings) FTPTestResult {
 	if cfg.Username == "" {
 		return fail("Validate config", "username is empty")
 	}
-	add("Validate config", "ok", fmt.Sprintf("host=%s tls=%v", cfg.Host, cfg.TLS))
+	port := cfg.Port
+	if port <= 0 {
+		port = 21
+	}
+	addr := fmt.Sprintf("%s:%d", cfg.Host, port)
+	add("Validate config", "ok", fmt.Sprintf("host=%s port=%d tls=%v", cfg.Host, port, cfg.TLS))
 
 	// Build dial options
 	dialOpts := []ftp.DialOption{
@@ -78,15 +83,15 @@ func testFTPConnection(cfg ftpSettings) FTPTestResult {
 
 	// Step: TCP connect + banner
 	start := time.Now()
-	conn, err := ftp.Dial(cfg.Host, dialOpts...)
+	conn, err := ftp.Dial(addr, dialOpts...)
 	if err != nil {
 		return fail("TCP connect / banner", err.Error())
 	}
 	elapsed := time.Since(start).Milliseconds()
 	if cfg.TLS {
-		add("TCP connect / TLS / banner", "ok", fmt.Sprintf("connected in %d ms (FTPS)", elapsed))
+		add("TCP connect / TLS / banner", "ok", fmt.Sprintf("connected to %s in %d ms (FTPS)", addr, elapsed))
 	} else {
-		add("TCP connect / banner", "ok", fmt.Sprintf("connected in %d ms", elapsed))
+		add("TCP connect / banner", "ok", fmt.Sprintf("connected to %s in %d ms", addr, elapsed))
 	}
 
 	// Step: Login
@@ -290,9 +295,14 @@ func ftpUpload(cfg ftpSettings, filename string, data []byte) error {
 		dialOpts = append(dialOpts, ftp.DialWithExplicitTLS(nil))
 	}
 
-	conn, err := ftp.Dial(cfg.Host, dialOpts...)
+	port := cfg.Port
+	if port <= 0 {
+		port = 21
+	}
+	addr := fmt.Sprintf("%s:%d", cfg.Host, port)
+	conn, err := ftp.Dial(addr, dialOpts...)
 	if err != nil {
-		return fmt.Errorf("dial %s: %w", cfg.Host, err)
+		return fmt.Errorf("dial %s: %w", addr, err)
 	}
 	defer conn.Quit() //nolint:errcheck
 
