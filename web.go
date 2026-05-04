@@ -2,6 +2,7 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"compress/gzip"
 	"crypto/rand"
@@ -12,6 +13,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"html/template"
+	"io"
 	"io/fs"
 	"log"
 	"net/http"
@@ -686,38 +688,67 @@ func startHTTPServer(
 			http.Error(w, "invalid station label", http.StatusBadRequest)
 			return
 		}
-		// Find the Grape-format filename for this station/date
+		// Find all Grape-format CSV files for this station/date.
+		// Each app restart creates a new timestamped file, so there may be
+		// multiple files per day — collect them all, sorted by name (which
+		// sorts chronologically since the timestamp is the filename prefix).
 		dir := filepath.Join(mgr.dataDir,
 			fmt.Sprintf("%04d", t.Year()),
 			fmt.Sprintf("%02d", t.Month()),
 			fmt.Sprintf("%02d", t.Day()),
 		)
-		// List files in the directory matching the station label
 		entries, err := os.ReadDir(dir)
 		if err != nil {
 			http.Error(w, "no data for that station/date", http.StatusNotFound)
 			return
 		}
-		var matchPath string
+		suffix := "_FRQ_" + label + ".csv"
+		var matchPaths []string
 		for _, e := range entries {
-			if strings.Contains(e.Name(), "_FRQ_"+label+".csv") {
-				matchPath = filepath.Join(dir, e.Name())
-				break
+			if strings.HasSuffix(e.Name(), suffix) {
+				matchPaths = append(matchPaths, filepath.Join(dir, e.Name()))
 			}
 		}
-		if matchPath == "" {
+		if len(matchPaths) == 0 {
 			http.Error(w, "no data for that station/date", http.StatusNotFound)
 			return
 		}
-		f, err := os.Open(matchPath)
-		if err != nil {
-			http.Error(w, "no data for that station/date", http.StatusNotFound)
-			return
-		}
-		defer f.Close()
+		// os.ReadDir returns entries in directory order (alphabetical), which
+		// is chronological for our timestamp-prefixed filenames.
+		// Build a synthetic download filename from the first file's name but
+		// strip the open-time timestamp so it represents the whole day.
+		dlName := filepath.Base(matchPaths[0])
 		w.Header().Set("Content-Type", "text/csv")
-		w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="%s"`, filepath.Base(matchPath)))
-		http.ServeContent(w, r, filepath.Base(matchPath), t, f)
+		w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="%s"`, dlName))
+		w.Header().Set("Cache-Control", "no-cache")
+		// Stream all matching files in order. For the first file emit everything;
+		// for subsequent files skip the header lines (lines starting with '#'
+		// and the "UTC,Freq,Vpk" column header) so the download is one clean CSV.
+		for i, p := range matchPaths {
+			f, err := os.Open(p)
+			if err != nil {
+				continue
+			}
+			if i == 0 {
+				// First file: stream verbatim
+				io.Copy(w, f) //nolint:errcheck
+			} else {
+				// Subsequent files: skip header lines
+				scanner := bufio.NewScanner(f)
+				pastHeader := false
+				for scanner.Scan() {
+					line := scanner.Text()
+					if !pastHeader {
+						if line == "UTC,Freq,Vpk" {
+							pastHeader = true
+						}
+						continue
+					}
+					fmt.Fprintln(w, line)
+				}
+			}
+			f.Close()
+		}
 	})
 
 	// ── Audio info ─────────────────────────────────────────────────────────
