@@ -31,6 +31,7 @@ window.DopplerMap = (() => {
   let terminatorTimer = null;
   let visible        = false;
   let initialised    = false;
+  let stationVisible = {};   // label → boolean (true = shown, false = hidden)
 
   // ── Colour constants ─────────────────────────────────────────────────────────
   const NIGHT_FILL   = 'rgba(0, 10, 40, 0.45)';
@@ -168,6 +169,8 @@ window.DopplerMap = (() => {
 
     stations.forEach((s, idx) => {
       if (!s.config || !s.config.grid || s.config.is_reference) return;
+      // Skip stations the user has hidden
+      if (stationVisible[s.config.label] === false) return;
       const txPos = maidenheadToLatLon(s.config.grid);
       if (!txPos) return;
 
@@ -241,6 +244,63 @@ window.DopplerMap = (() => {
 
       stationLayers[label] = { txMarker, pathLine, reflMarkers };
     });
+  }
+
+  // ── Station visibility toggle control ───────────────────────────────────────
+
+  /** Load per-station visibility from localStorage into stationVisible. */
+  function loadStationVisibility() {
+    try {
+      const raw = localStorage.getItem('mapStationVisible');
+      if (raw) stationVisible = JSON.parse(raw);
+    } catch (_) {}
+  }
+
+  /** Persist current stationVisible map to localStorage. */
+  function saveStationVisibility() {
+    try {
+      localStorage.setItem('mapStationVisible', JSON.stringify(stationVisible));
+    } catch (_) {}
+  }
+
+  /** Build the Leaflet control container for station toggles (bottomleft). */
+  function buildStationToggleControl() {
+    const ctrl = L.control({ position: 'bottomleft' });
+    ctrl.onAdd = () => {
+      const div = L.DomUtil.create('div', 'map-station-toggles');
+      div.id = 'map-station-toggles';
+      // Prevent map interactions from firing through the control
+      L.DomEvent.disableClickPropagation(div);
+      L.DomEvent.disableScrollPropagation(div);
+      return div;
+    };
+    ctrl.addTo(map);
+  }
+
+  /** Repopulate the station toggle control with one checkbox per non-reference station. */
+  function updateStationToggles() {
+    const el = document.getElementById('map-station-toggles');
+    if (!el) return;
+    const stations = (typeof state !== 'undefined') ? state.stations : [];
+    const nonRef = stations.filter(s => s.config && !s.config.is_reference);
+
+    if (!nonRef.length) { el.innerHTML = ''; return; }
+
+    const rows = nonRef.map(s => {
+      const label   = s.config.label;
+      const origIdx = stations.indexOf(s);
+      const colour  = colourForIndex(origIdx);
+      const checked = stationVisible[label] !== false;
+      const safeId  = `map-tog-${label.replace(/[^a-zA-Z0-9]/g, '_')}`;
+      return `<label class="map-toggle-row" for="${safeId}">
+        <input type="checkbox" id="${safeId}" ${checked ? 'checked' : ''}
+               onchange="DopplerMap.toggleStation('${label.replace(/'/g, "\\'")}', this.checked)">
+        <span class="map-toggle-dot" style="background:${colour}"></span>
+        <span class="map-toggle-label">${label}</span>
+      </label>`;
+    }).join('');
+
+    el.innerHTML = `<div class="map-toggle-title">Stations</div>${rows}`;
   }
 
   // ── Legend ──────────────────────────────────────────────────────────────────
@@ -341,6 +401,7 @@ window.DopplerMap = (() => {
     if (initialised) return;
     initialised = true;
     visible = true;
+    loadStationVisibility();
 
     map = L.map('doppler-map', {
       center: [30, -40],
@@ -361,6 +422,7 @@ window.DopplerMap = (() => {
     addTerminator();
     buildLegend();
     buildClock();
+    buildStationToggleControl();
     buildFreqReadout();
 
     // Refresh terminator every 60 s
@@ -383,8 +445,24 @@ window.DopplerMap = (() => {
     clearStationLayers();
     buildStationLayers(stations, rxGrid);
     refreshTerminator();
+    updateStationToggles();
     updateFreqReadout();
   }
 
-  return { init, update, updateFreqReadout };
+  /**
+   * Toggle a station's visibility on the map.
+   * Called by the inline onchange handler in the toggle control.
+   */
+  function toggleStation(label, visible) {
+    stationVisible[label] = visible;
+    saveStationVisibility();
+    // Rebuild only the station layers (no need to re-fetch anything)
+    const stations = (typeof state !== 'undefined') ? state.stations : [];
+    const rxGrid   = (typeof state !== 'undefined') ? state.receiverGrid : null;
+    clearStationLayers();
+    buildStationLayers(stations, rxGrid);
+    updateFreqReadout();
+  }
+
+  return { init, update, updateFreqReadout, toggleStation };
 })();
