@@ -2575,18 +2575,23 @@ document.addEventListener('DOMContentLoaded', async () => {
         logEl.innerHTML = '';
         for (const step of (result.steps || [])) {
           const row = document.createElement('div');
-          const cls = step.ok ? 'ftp-log-ok' : (step.skipped ? 'ftp-log-skip' : 'ftp-log-err');
+          // Go fields: step.status = "ok" | "error" | "skip"
+          const isOk   = step.status === 'ok';
+          const isSkip = step.status === 'skip';
+          const cls  = isOk ? 'ftp-log-ok' : (isSkip ? 'ftp-log-skip' : 'ftp-log-err');
+          const icon = isOk ? '✓' : (isSkip ? '–' : '✗');
           row.className = `ftp-log-row ${cls}`;
-          const icon = step.ok ? '✓' : (step.skipped ? '–' : '✗');
           row.innerHTML = `<span class="ftp-log-icon">${icon}</span>`
-                        + `<span class="ftp-log-step">${escapeHtml(step.name)}</span>`
-                        + `<span class="ftp-log-msg">${escapeHtml(step.message || '')}</span>`;
+                        + `<span class="ftp-log-step">${escapeHtml(step.step || '')}</span>`
+                        + `<span class="ftp-log-msg">${escapeHtml(step.detail || '')}</span>`;
           logEl.appendChild(row);
         }
-        // Summary row
+        // Summary row — top-level field is "ok" (bool)
         const summary = document.createElement('div');
-        summary.className = `ftp-log-summary ${result.success ? 'ftp-log-ok' : 'ftp-log-err'}`;
-        summary.textContent = result.success ? '✓ Connection test passed' : `✗ Test failed: ${result.error || 'unknown error'}`;
+        summary.className = `ftp-log-summary ${result.ok ? 'ftp-log-ok' : 'ftp-log-err'}`;
+        summary.textContent = result.ok
+          ? '✓ Connection test passed'
+          : `✗ Test failed: ${(result.steps || []).filter(s => s.status === 'error').map(s => s.detail).join('; ') || 'unknown error'}`;
         logEl.appendChild(summary);
       } catch (err) {
         logEl.innerHTML = '';
