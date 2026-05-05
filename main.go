@@ -397,14 +397,26 @@ type stationConfig struct {
 	IsReference bool    `json:"is_reference"` // true = local reference signal (e.g. leaky GPSDO)
 	// When is_reference is true, this station's Doppler is subtracted from all
 	// other stations' readings to cancel hardware clock drift in real time.
+
+	// Signal quality gates — 0 means "use the compiled-in default".
+	// MaxSignalBWHz: maximum 3 dB bandwidth of the peak (Hz).  Peaks wider
+	//   than this are rejected as broadband noise.  Default: 4 Hz.
+	// LocalSNRWindowHz: half-width of the local neighbourhood used for the
+	//   local-SNR gate (Hz).  The peak must exceed the median of bins in
+	//   [peak±LocalSNRWindowHz] (excluding a ±4 Hz guard) by at least MinSNR.
+	//   Default: 10 Hz.
+	MaxSignalBWHz    float64 `json:"max_signal_bw_hz"`    // 0 → default (4 Hz)
+	LocalSNRWindowHz float64 `json:"local_snr_window_hz"` // 0 → default (10 Hz)
 }
 
 // defaultStationConfig returns sensible defaults for a new station.
 func defaultStationConfig() stationConfig {
 	return stationConfig{
-		MinSNR:     10.0,
-		MaxDriftHz: 50.0, // spectrum window is ±50 Hz (200 bins × 0.5 Hz/bin)
-		Enabled:    true,
+		MinSNR:           10.0,
+		MaxDriftHz:       50.0, // spectrum window is ±50 Hz (200 bins × 0.5 Hz/bin)
+		MaxSignalBWHz:    4.0,
+		LocalSNRWindowHz: 10.0,
+		Enabled:          true,
 	}
 }
 

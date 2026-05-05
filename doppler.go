@@ -304,6 +304,8 @@ type DopplerStation struct {
 	historySafeLabel string // sanitised label safe for use in filenames
 	minSNR           float64
 	maxDriftHz       float64
+	maxSignalBWHz    float64 // 0 → use maxSignalBandwidthHz default
+	localSNRWindowHz float64 // 0 → use localSNRWindowBins default
 
 	// cancel stops this station's run goroutine independently of the global context.
 	cancel context.CancelFunc
@@ -371,6 +373,8 @@ func newDopplerStation(cfg stationConfig, ubersdrURL, dataDir string, hub *sseHu
 		historySafeLabel: safe,
 		minSNR:           cfg.MinSNR,
 		maxDriftHz:       cfg.MaxDriftHz,
+		maxSignalBWHz:    cfg.MaxSignalBWHz,
+		localSNRWindowHz: cfg.LocalSNRWindowHz,
 		hub:              hub,
 		csvWriter:        cw,
 		audioHub:         newAudioBroadcastHub(),
@@ -839,7 +843,7 @@ func (ds *DopplerStation) runSpectrumLoop(ctx context.Context) {
 				continue
 			}
 
-			reading, peakBin := detectDopplerWithPeak(bins, binBW, ds.minSNR, ds.maxDriftHz)
+			reading, peakBin := detectDopplerWithPeak(bins, binBW, ds.minSNR, ds.maxDriftHz, ds.maxSignalBWHz, ds.localSNRWindowHz)
 			reading.Timestamp = time.Now().UTC()
 
 			// ── Signal-recovery debounce ──────────────────────────────────────
@@ -1102,14 +1106,17 @@ var wsDialer = &websocket.Dialer{
 //   - P5 noise floor (same as UberSDR)
 //   - power-weighted centroid over the contiguous 3 dB range around the peak
 //   - prefer peak near centre if within 30 dB of global max
-func detectDoppler(bins []float32, binBandwidth, minSNR, maxDriftHz float64) DopplerReading {
-	r, _ := detectDopplerWithPeak(bins, binBandwidth, minSNR, maxDriftHz)
+//
+// maxSignalBWHz: max 3 dB bandwidth of a valid carrier (0 → default 4 Hz).
+// localSNRWindowHz: half-width of local-SNR neighbourhood (0 → default 10 Hz).
+func detectDoppler(bins []float32, binBandwidth, minSNR, maxDriftHz, maxSignalBWHz, localSNRWindowHz float64) DopplerReading {
+	r, _ := detectDopplerWithPeak(bins, binBandwidth, minSNR, maxDriftHz, maxSignalBWHz, localSNRWindowHz)
 	return r
 }
 
 // detectDopplerWithPeak is like detectDoppler but also returns the integer peak bin index.
 // Returns -1 for peakBin when no valid signal is found.
-func detectDopplerWithPeak(bins []float32, binBandwidth, minSNR, maxDriftHz float64) (DopplerReading, int) {
+func detectDopplerWithPeak(bins []float32, binBandwidth, minSNR, maxDriftHz, maxSignalBWHz, localSNRWindowHz float64) (DopplerReading, int) {
 	n := len(bins)
 	if n == 0 {
 		return DopplerReading{}, -1
@@ -1163,22 +1170,24 @@ func detectDopplerWithPeak(bins []float32, binBandwidth, minSNR, maxDriftHz floa
 		peakPower = centerPeakPower
 	}
 
-	// Local SNR gate: compare the peak against the median of a ±localSNRWindowHz
-	// neighbourhood, excluding a ±localSNRExcludeHz guard band around the peak.
+	// Local SNR gate: compare the peak against the median of a local
+	// neighbourhood, excluding a ±4 Hz guard band around the peak.
 	// A real CW carrier stands sharply above its local neighbourhood; a noise
 	// peak is only a few dB above its neighbours even when the global P5 SNR
 	// looks acceptable.  This is the primary defence against broadband noise
 	// false-locks.
 	//
-	// Window: ±20 bins (10 Hz at 0.5 Hz/bin) — wide enough to sample the local
-	// noise floor but not so wide that it picks up other signals.
-	// Guard:  ±8 bins  (4 Hz) — excludes the carrier itself and its leakage
-	// skirts so the carrier power doesn't inflate the local floor estimate.
-	const localSNRWindowBins = 20 // ±10 Hz
-	const localSNRGuardBins = 8   // ±4 Hz guard around peak
+	// localSNRWindowHz controls the half-width of the neighbourhood (default 10 Hz).
+	// Guard is always ±4 Hz to exclude the carrier and its leakage skirts.
 	{
-		winLo := peakBin - localSNRWindowBins
-		winHi := peakBin + localSNRWindowBins
+		winHz := localSNRWindowHz
+		if winHz <= 0 {
+			winHz = 10.0 // default: ±10 Hz neighbourhood
+		}
+		winBins := int(winHz / binBandwidth)
+		const localSNRGuardBins = 8 // ±4 Hz guard around peak (fixed)
+		winLo := peakBin - winBins
+		winHi := peakBin + winBins
 		if winLo < 0 {
 			winLo = 0
 		}
@@ -1240,12 +1249,16 @@ func detectDopplerWithPeak(bins []float32, binBandwidth, minSNR, maxDriftHz floa
 		endBin = i
 	}
 
-	// Spectral width gate: reject peaks whose 3 dB bandwidth exceeds
-	// maxSignalBandwidthHz.  A real CW carrier is spectrally very narrow
-	// (1–2 bins at 0.5 Hz/bin); a 20 Hz noise burst will span 40+ bins and
-	// is rejected here even if its peak clears the SNR threshold.
+	// Spectral width gate: reject peaks whose 3 dB bandwidth exceeds the
+	// configured limit.  A real CW carrier is spectrally very narrow
+	// (1–2 bins at 0.5 Hz/bin); a noise burst will span many more bins.
+	// maxSignalBWHz controls the limit (default: maxSignalBandwidthHz = 4 Hz).
+	bwLimit := maxSignalBWHz
+	if bwLimit <= 0 {
+		bwLimit = maxSignalBandwidthHz // compiled-in default (4 Hz)
+	}
 	bwHz := float64(endBin-startBin+1) * binBandwidth
-	if bwHz > maxSignalBandwidthHz {
+	if bwHz > bwLimit {
 		return DopplerReading{SNR: snr, SignalDBFS: peakPower, NoiseDBFS: noiseFloor, Valid: false}, -1
 	}
 
@@ -1794,6 +1807,8 @@ func (m *stationManager) update(id string, cfg stationConfig) error {
 	target.cfg = cfg
 	target.minSNR = cfg.MinSNR
 	target.maxDriftHz = cfg.MaxDriftHz
+	target.maxSignalBWHz = cfg.MaxSignalBWHz
+	target.localSNRWindowHz = cfg.LocalSNRWindowHz
 	m.setRefProviders()
 	m.mu.Unlock()
 

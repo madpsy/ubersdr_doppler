@@ -2110,7 +2110,7 @@ function renderStationList() {
           <span class="station-dot" style="background:${colour}"></span>
           ${cfg.label}${cfg.is_reference ? ' <span class="ref-badge">REF</span>' : ''}
         </span>
-        <span class="station-meta">${fmtHz(cfg.freq_hz)} · SNR ≥ ${cfg.min_snr} dB · ±${cfg.max_drift_hz} Hz · ${cfg.enabled ? 'enabled' : 'disabled'}${refNote}${cfg.callsign ? ' · ' + cfg.callsign : ''}${cfg.grid ? ' · ' + cfg.grid : ''}</span>
+        <span class="station-meta">${fmtHz(cfg.freq_hz)} · SNR ≥ ${cfg.min_snr} dB · ±${cfg.max_drift_hz} Hz · BW ≤ ${cfg.max_signal_bw_hz || 4} Hz · ${cfg.enabled ? 'enabled' : 'disabled'}${refNote}${cfg.callsign ? ' · ' + cfg.callsign : ''}${cfg.grid ? ' · ' + cfg.grid : ''}</span>
       </div>
       ${actions}
     </div>`;
@@ -2158,8 +2158,10 @@ function openModal(title, cfg = {}) {
   document.getElementById('f-freq').value = cfg.freq_hz || '';
   document.getElementById('f-callsign').value = cfg.callsign || '';
   document.getElementById('f-grid').value = cfg.grid || '';
-  document.getElementById('f-min-snr').value = cfg.min_snr ?? 30;
+  document.getElementById('f-min-snr').value = cfg.min_snr ?? 10;
   document.getElementById('f-max-drift').value = cfg.max_drift_hz ?? 50;
+  document.getElementById('f-max-bw').value = cfg.max_signal_bw_hz || 4;
+  document.getElementById('f-local-snr-window').value = cfg.local_snr_window_hz || 10;
   document.getElementById('f-enabled').checked = cfg.enabled !== false;
   document.getElementById('f-reference').checked = cfg.is_reference === true;
   const presetRow = document.getElementById('preset-row');
@@ -2777,9 +2779,11 @@ document.addEventListener('DOMContentLoaded', async () => {
       label:        document.getElementById('f-label').value.trim(),
       freq_hz:      parseInt(document.getElementById('f-freq').value, 10),
       callsign:     document.getElementById('f-callsign').value.trim(),
-      grid:         document.getElementById('f-grid').value.trim(),
-      min_snr:      parseFloat(document.getElementById('f-min-snr').value),
-      max_drift_hz: parseFloat(document.getElementById('f-max-drift').value),
+      grid:                document.getElementById('f-grid').value.trim(),
+      min_snr:             parseFloat(document.getElementById('f-min-snr').value),
+      max_drift_hz:        parseFloat(document.getElementById('f-max-drift').value),
+      max_signal_bw_hz:    parseFloat(document.getElementById('f-max-bw').value) || 0,
+      local_snr_window_hz: parseFloat(document.getElementById('f-local-snr-window').value) || 0,
       enabled:      document.getElementById('f-enabled').checked,
       is_reference: document.getElementById('f-reference').checked,
     };

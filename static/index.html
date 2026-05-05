@@ -321,6 +321,16 @@
               </label>
             </div>
             <div class="form-row">
+              <label>Max Signal BW (Hz)
+                <input type="number" id="f-max-bw" value="4" step="0.5" min="0.5" max="20">
+                <span class="field-hint">Reject peaks wider than this at 3 dB (0 = default 4 Hz). Noise bursts are much wider than a real carrier.</span>
+              </label>
+              <label>Local SNR Window (Hz)
+                <input type="number" id="f-local-snr-window" value="10" step="1" min="2" max="40">
+                <span class="field-hint">Half-width of neighbourhood used for local SNR check (0 = default 10 Hz). Peak must exceed local median by Min SNR.</span>
+              </label>
+            </div>
+            <div class="form-row">
               <label class="checkbox-label">
                 <input type="checkbox" id="f-enabled" checked> Enabled
               </label>
