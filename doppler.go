@@ -907,6 +907,21 @@ func (ds *DopplerStation) runSpectrumLoop(ctx context.Context) {
 				}
 			}
 
+			// Post-correction drift gate: reject readings whose corrected Doppler
+			// exceeds maxDriftHz. We gate on the corrected value when available
+			// (reference station or manual offset applied), otherwise on the raw
+			// value. This means the ±maxDriftHz window is interpreted as a
+			// post-correction validity range, not a raw search window.
+			if reading.Valid {
+				gateVal := reading.DopplerHz
+				if reading.CorrectedDopplerHz != nil {
+					gateVal = *reading.CorrectedDopplerHz
+				}
+				if math.Abs(gateVal) > ds.maxDriftHz {
+					reading.Valid = false
+				}
+			}
+
 			// Write 1-second reading to Grape CSV
 			if reading.Valid {
 				ds.csvWriter.writeReading(ds.cfg, reading)
@@ -1280,11 +1295,6 @@ func detectDopplerWithPeak(bins []float32, binBandwidth, minSNR, maxDriftHz, max
 
 	// Offset from centre bin → Doppler Hz
 	dopplerHz := (centroidBin - float64(n)/2.0) * binBandwidth
-
-	// Final validation: reject if centroid drifted outside allowed range (same as UberSDR)
-	if math.Abs(dopplerHz) > maxDriftHz {
-		return DopplerReading{SNR: snr, SignalDBFS: peakPower, NoiseDBFS: noiseFloor, Valid: false}, -1
-	}
 
 	return DopplerReading{
 		DopplerHz:  dopplerHz,
