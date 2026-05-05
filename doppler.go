@@ -1115,7 +1115,8 @@ func detectDopplerWithPeak(bins []float32, binBandwidth, minSNR, maxDriftHz floa
 		return DopplerReading{}, -1
 	}
 
-	// Noise floor: P5 percentile (same as UberSDR)
+	// Noise floor: P5 percentile of the full spectrum (same as UberSDR).
+	// Used for the reported SNR value and the initial coarse gate.
 	noiseFloor := percentileFloat32(bins, 5)
 
 	// Search range: centre bin ± maxDriftHz
@@ -1160,6 +1161,46 @@ func detectDopplerWithPeak(bins []float32, binBandwidth, minSNR, maxDriftHz floa
 		(peakPower-centerPeakPower) <= 30.0 {
 		peakBin = centerPeakBin
 		peakPower = centerPeakPower
+	}
+
+	// Local SNR gate: compare the peak against the median of a ±localSNRWindowHz
+	// neighbourhood, excluding a ±localSNRExcludeHz guard band around the peak.
+	// A real CW carrier stands sharply above its local neighbourhood; a noise
+	// peak is only a few dB above its neighbours even when the global P5 SNR
+	// looks acceptable.  This is the primary defence against broadband noise
+	// false-locks.
+	//
+	// Window: ±20 bins (10 Hz at 0.5 Hz/bin) — wide enough to sample the local
+	// noise floor but not so wide that it picks up other signals.
+	// Guard:  ±8 bins  (4 Hz) — excludes the carrier itself and its leakage
+	// skirts so the carrier power doesn't inflate the local floor estimate.
+	const localSNRWindowBins = 20 // ±10 Hz
+	const localSNRGuardBins = 8   // ±4 Hz guard around peak
+	{
+		winLo := peakBin - localSNRWindowBins
+		winHi := peakBin + localSNRWindowBins
+		if winLo < 0 {
+			winLo = 0
+		}
+		if winHi >= n {
+			winHi = n - 1
+		}
+		guardLo := peakBin - localSNRGuardBins
+		guardHi := peakBin + localSNRGuardBins
+
+		var localBins []float32
+		for i := winLo; i <= winHi; i++ {
+			if i < guardLo || i > guardHi {
+				localBins = append(localBins, bins[i])
+			}
+		}
+		if len(localBins) >= 4 {
+			localFloor := percentileFloat32(localBins, 50) // median of neighbourhood
+			localSNR := peakPower - localFloor
+			if float64(localSNR) < minSNR {
+				return DopplerReading{SNR: snr, SignalDBFS: peakPower, NoiseDBFS: noiseFloor, Valid: false}, -1
+			}
+		}
 	}
 
 	// Sub-bin frequency estimation: parabolic interpolation on the peak and its
