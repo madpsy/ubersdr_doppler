@@ -159,9 +159,24 @@ async function fetchSDRDescription() {
     const maidenhead = d.maidenhead || null;
     const lat        = (typeof d.lat === 'number' && d.lat !== 0) ? d.lat : null;
     const lon        = (typeof d.lon === 'number' && d.lon !== 0) ? d.lon : null;
-    if (callsign)   state.receiverCallsign = callsign;
+    const asl        = (typeof d.asl === 'number') ? d.asl : null;
+    const location   = d.location   || null;
+    if (callsign)     state.receiverCallsign = callsign;
     if (lat !== null) state.receiverLat = lat;
     if (lon !== null) state.receiverLon = lon;
+
+    // Populate read-only receiver identity fields in Settings
+    const setRI = (id, val) => {
+      const el = document.getElementById(id);
+      if (el) el.value = (val !== null && val !== undefined && val !== '') ? val : '';
+    };
+    setRI('ri-callsign', callsign);
+    setRI('ri-grid',     maidenhead);
+    setRI('ri-location', location);
+    setRI('ri-lat',      lat !== null ? lat.toFixed(6) : '');
+    setRI('ri-lon',      lon !== null ? lon.toFixed(6) : '');
+    setRI('ri-asl',      asl !== null ? asl.toFixed(1) : '');
+
     if (maidenhead) {
       state.receiverGrid = maidenhead;
       updateSpecGridBadges(); // update any already-rendered spectrum panels

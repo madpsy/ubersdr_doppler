@@ -341,11 +341,32 @@
     <!-- Global settings -->
     <section id="settings-section">
       <h2>Settings</h2>
-      <p class="chart-hint" style="margin-bottom:12px">
-        Callsign, grid square, latitude, longitude, elevation and location are read automatically
-        from the UberSDR receiver — no manual entry needed.
-      </p>
       <div id="ref-quality-banner" class="ref-banner hidden"></div>
+      <fieldset class="receiver-info-fieldset">
+        <legend>Receiver Identity <span class="field-hint" style="font-weight:normal">(auto-populated from UberSDR)</span></legend>
+        <div class="form-row">
+          <label>Callsign
+            <input type="text" id="ri-callsign" disabled placeholder="—">
+          </label>
+          <label>Grid Square
+            <input type="text" id="ri-grid" disabled placeholder="—">
+          </label>
+          <label>Location
+            <input type="text" id="ri-location" disabled placeholder="—">
+          </label>
+        </div>
+        <div class="form-row">
+          <label>Latitude
+            <input type="text" id="ri-lat" disabled placeholder="—">
+          </label>
+          <label>Longitude
+            <input type="text" id="ri-lon" disabled placeholder="—">
+          </label>
+          <label>Elevation (m ASL)
+            <input type="text" id="ri-asl" disabled placeholder="—">
+          </label>
+        </div>
+      </fieldset>
       <form id="settings-form">
         <div class="form-row">
           <label>HamSCI Node Number

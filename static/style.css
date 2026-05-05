@@ -85,6 +85,29 @@ header {
   font-weight: 600;
 }
 
+/* Receiver identity fieldset (read-only, auto-populated from UberSDR) */
+.receiver-info-fieldset {
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 12px 16px 14px;
+  margin-bottom: 18px;
+}
+.receiver-info-fieldset legend {
+  padding: 0 6px;
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+.receiver-info-fieldset input[disabled] {
+  background: var(--bg);
+  color: var(--muted);
+  cursor: default;
+  border-color: var(--border);
+  opacity: 1;
+}
+
 /* Connection badge */
 .conn-badge {
   font-size: 0.8rem;
