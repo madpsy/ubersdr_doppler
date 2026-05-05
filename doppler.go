@@ -1687,7 +1687,7 @@ func (m *stationManager) add(cfg stationConfig) (*DopplerStation, error) {
 		cfg.MinSNR = 10.0
 	}
 	if cfg.MaxDriftHz == 0 {
-		cfg.MaxDriftHz = 5.0
+		cfg.MaxDriftHz = 2.0
 	}
 	// Clamp maxDriftHz to the spectrum window half-width so the search range
 	// never exceeds what the spectrum can actually see.
