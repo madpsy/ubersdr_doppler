@@ -421,7 +421,10 @@ function renderStatusTable() {
   const refLabel = document.getElementById('show-ref-label');
   if (refLabel) refLabel.style.display = showRef ? '' : 'none';
 
-  if (thead) {
+  // Rebuild header only when the "Corrected" column presence changes.
+  // Track the last-rendered showRef state on the thead element itself.
+  if (thead && thead._showRef !== showRef) {
+    thead._showRef = showRef;
     thead.innerHTML = `
       <th>Station</th>
       <th>Frequency</th>
@@ -442,7 +445,27 @@ function renderStatusTable() {
     return;
   }
 
-  tbody.innerHTML = state.stations.map((s, i) => {
+  // ── Build a keyed map of existing rows so we can patch in-place ──────────
+  // Rows are identified by data-label; any row whose label is no longer in
+  // state.stations is removed, and new stations get a freshly created row.
+  const existingRows = {};
+  for (const tr of Array.from(tbody.querySelectorAll('tr[data-label]'))) {
+    existingRows[tr.dataset.label] = tr;
+  }
+
+  // Helper: set a td's innerHTML only when it actually changed (avoids
+  // unnecessary reflow and, crucially, keeps the button DOM node stable).
+  function patchCell(td, html) {
+    if (td && td.innerHTML !== html) td.innerHTML = html;
+  }
+  function patchAttr(el, attr, val) {
+    if (el && el.getAttribute(attr) !== val) el.setAttribute(attr, val);
+  }
+
+  // Collect the labels we want, in order, so we can reorder rows if needed.
+  const wantedLabels = state.stations.map(s => s.config.label);
+
+  state.stations.forEach((s, i) => {
     const r = s.current || {};
     const valid = r.valid;
     const colour = colourForIndex(i);
@@ -459,7 +482,7 @@ function renderStatusTable() {
     const sig   = valid ? r.signal_dbfs.toFixed(1) + ' dBFS' : '—';
     const noise = valid ? r.noise_dbfs.toFixed(1) + ' dBFS' : '—';
 
-    // Timestamp cell: show UTC time + stale badge if data has gone quiet
+    // Timestamp cell
     let tsHtml;
     if (!r.timestamp) {
       tsHtml = '—';
@@ -471,30 +494,25 @@ function renderStatusTable() {
       tsHtml = fmtUTC(r.timestamp) + staleBadge;
     }
 
-    let corrCell = '';
+    // Corrected Doppler cell HTML
+    let corrHtml = null; // null = column not shown
     if (showRef) {
       if (isRef) {
-        corrCell = '<td style="color:var(--muted)">— (ref)</td>';
+        corrHtml = '<td style="color:var(--muted)">— (ref)</td>';
       } else {
-        // Prefer corrected value from the live reading; fall back to cached station value
         const cHz = (valid && r.corrected_doppler_hz !== null && r.corrected_doppler_hz !== undefined)
           ? r.corrected_doppler_hz
           : (s.corrected_doppler_hz !== null && s.corrected_doppler_hz !== undefined ? s.corrected_doppler_hz : null);
-        if (cHz !== null) {
-          corrCell = `<td class="${dopplerClass(cHz)}">${fmtDoppler(cHz)}</td>`;
-        } else {
-          corrCell = '<td class="invalid">—</td>';
-        }
+        corrHtml = cHz !== null
+          ? `<td class="${dopplerClass(cHz)}">${fmtDoppler(cHz)}</td>`
+          : '<td class="invalid">—</td>';
       }
     }
 
-    let baselineCell = '<td style="color:var(--muted)">—</td>';
-    if (s.baseline_mean_hz !== null && s.baseline_mean_hz !== undefined) {
-      baselineCell = `<td style="color:var(--muted)">${fmtDoppler(s.baseline_mean_hz)}</td>`;
-    }
+    const baselineInner = (s.baseline_mean_hz !== null && s.baseline_mean_hz !== undefined)
+      ? fmtDoppler(s.baseline_mean_hz) : '—';
 
-    // State cell — stale takes priority over no-signal
-    // SNR quality scale: Poor ≥30 dB · Fair ≥35 · Good ≥40 · Very Good ≥45 · Excellent ≥50
+    // State cell
     let stateTxt;
     if (stale) {
       const agoStr = fmtAgo(lastSeen) || 'unknown';
@@ -513,7 +531,7 @@ function renderStatusTable() {
       stateTxt = '<span class="state-poor">● Poor</span>';
     }
 
-    // Per-station backend connection dot (shown next to the station name)
+    // Backend connection dot
     let dotClass = 'backend-dot-ok';
     let dotTitle = 'Backend receiving data';
     if (stale) {
@@ -538,7 +556,6 @@ function renderStatusTable() {
       dotClass = 'backend-dot-poor';
       dotTitle = `Poor signal — SNR ${r.snr_db.toFixed(1)} dB`;
     }
-    const backendDot = `<span class="backend-dot ${dotClass}" title="${dotTitle}"></span>`;
 
     // Row-level CSS class
     let rowClass = '';
@@ -547,22 +564,167 @@ function renderStatusTable() {
 
     const refBadge = isRef ? ' <span class="ref-badge">REF</span>' : '';
     const isPlaying = state.audioPlaying === label;
-    const previewBtn = `<button class="btn btn-secondary btn-sm" onclick="toggleAudioPreview('${label}')">${isPlaying ? '⏹ Stop' : '▶ Listen'}</button>`;
+    const btnLabel = isPlaying ? '⏹ Stop' : '▶ Listen';
 
-    return `<tr class="${rowClass}">
-      <td><span class="station-dot" style="background:${colour}"></span><strong>${label}</strong>${refBadge}${backendDot}</td>
-      <td>${fmtHz(s.config.freq_hz)}</td>
-      <td class="${cls}">${dHz}</td>
-      ${corrCell}
-      ${baselineCell}
-      <td>${snr}</td>
-      <td>${sig}</td>
-      <td>${noise}</td>
-      <td>${tsHtml}</td>
-      <td class="col-state">${stateTxt}</td>
-      <td>${previewBtn}</td>
-    </tr>`;
-  }).join('');
+    // ── Create row if it doesn't exist yet ───────────────────────────────────
+    let tr = existingRows[label];
+    if (!tr) {
+      tr = document.createElement('tr');
+      tr.dataset.label = label;
+
+      // Station name cell (static — colour dot, label, ref badge, backend dot)
+      const tdStation = document.createElement('td');
+      tdStation.innerHTML = `<span class="station-dot" style="background:${colour}"></span><strong>${escapeHtml(label)}</strong>${refBadge}<span class="backend-dot ${dotClass}" title="${escapeHtml(dotTitle)}"></span>`;
+      tr.appendChild(tdStation);
+
+      // Frequency cell (static — never changes for a given station)
+      const tdFreq = document.createElement('td');
+      tdFreq.textContent = fmtHz(s.config.freq_hz);
+      tr.appendChild(tdFreq);
+
+      // Raw doppler
+      const tdRaw = document.createElement('td');
+      tr.appendChild(tdRaw);
+
+      // Corrected doppler (only present when showRef)
+      if (showRef) {
+        const tdCorr = document.createElement('td');
+        tdCorr.dataset.col = 'corr';
+        tr.appendChild(tdCorr);
+      }
+
+      // Baseline
+      const tdBase = document.createElement('td');
+      tdBase.style.color = 'var(--muted)';
+      tdBase.dataset.col = 'baseline';
+      tr.appendChild(tdBase);
+
+      // SNR
+      const tdSnr = document.createElement('td');
+      tr.appendChild(tdSnr);
+
+      // Signal
+      const tdSig = document.createElement('td');
+      tr.appendChild(tdSig);
+
+      // Noise
+      const tdNoise = document.createElement('td');
+      tr.appendChild(tdNoise);
+
+      // Timestamp
+      const tdTs = document.createElement('td');
+      tr.appendChild(tdTs);
+
+      // State
+      const tdState = document.createElement('td');
+      tdState.className = 'col-state';
+      tr.appendChild(tdState);
+
+      // Preview button — created once, never destroyed
+      const tdPreview = document.createElement('td');
+      const btn = document.createElement('button');
+      btn.className = 'btn btn-secondary btn-sm';
+      btn.addEventListener('click', () => toggleAudioPreview(label));
+      btn.textContent = btnLabel;
+      tdPreview.appendChild(btn);
+      tr.appendChild(tdPreview);
+
+      tbody.appendChild(tr);
+      existingRows[label] = tr;
+    }
+
+    // ── Patch row class ───────────────────────────────────────────────────────
+    if (tr.className !== rowClass) tr.className = rowClass;
+
+    // ── Patch cells in-place ─────────────────────────────────────────────────
+    const cells = tr.cells;
+    let ci = 0;
+
+    // [0] Station name — update backend dot class/title only
+    const dot = cells[ci].querySelector('.backend-dot');
+    if (dot) {
+      if (dot.className !== `backend-dot ${dotClass}`) dot.className = `backend-dot ${dotClass}`;
+      if (dot.title !== dotTitle) dot.title = dotTitle;
+    }
+    ci++;
+
+    // [1] Frequency — static, skip
+    ci++;
+
+    // [2] Raw doppler
+    if (cells[ci].className !== cls) cells[ci].className = cls;
+    if (cells[ci].textContent !== dHz) cells[ci].textContent = dHz;
+    ci++;
+
+    // [3?] Corrected doppler — only when showRef
+    if (showRef) {
+      // If the column was just added (new row), it already exists; if showRef
+      // just became true for an existing row we need to insert the cell.
+      if (!cells[ci] || cells[ci].dataset.col !== 'corr') {
+        const tdCorr = document.createElement('td');
+        tdCorr.dataset.col = 'corr';
+        tr.insertBefore(tdCorr, cells[ci] || null);
+      }
+      // corrHtml is a full <td>…</td> string — extract just the inner HTML
+      if (corrHtml !== null) {
+        // Parse class and content from corrHtml
+        const tmpDiv = document.createElement('div');
+        tmpDiv.innerHTML = corrHtml;
+        const srcTd = tmpDiv.firstElementChild;
+        if (srcTd) {
+          if (cells[ci].className !== (srcTd.className || '')) cells[ci].className = srcTd.className || '';
+          if (cells[ci].style.color !== (srcTd.style.color || '')) cells[ci].style.color = srcTd.style.color || '';
+          if (cells[ci].innerHTML !== srcTd.innerHTML) cells[ci].innerHTML = srcTd.innerHTML;
+        }
+      }
+      ci++;
+    } else {
+      // Remove the corr column if it exists on this row (showRef just turned off)
+      if (cells[ci] && cells[ci].dataset.col === 'corr') {
+        tr.removeChild(cells[ci]);
+        // ci stays the same — next cell is now at ci
+      }
+    }
+
+    // Baseline
+    if (cells[ci].textContent !== baselineInner) cells[ci].textContent = baselineInner;
+    ci++;
+
+    // SNR
+    if (cells[ci].textContent !== snr) cells[ci].textContent = snr;
+    ci++;
+
+    // Signal
+    if (cells[ci].textContent !== sig) cells[ci].textContent = sig;
+    ci++;
+
+    // Noise
+    if (cells[ci].textContent !== noise) cells[ci].textContent = noise;
+    ci++;
+
+    // Timestamp
+    patchCell(cells[ci], tsHtml);
+    ci++;
+
+    // State
+    patchCell(cells[ci], stateTxt);
+    ci++;
+
+    // Preview button — only update the label text; never recreate the button
+    const previewBtn = cells[ci] && cells[ci].querySelector('button');
+    if (previewBtn && previewBtn.textContent !== btnLabel) previewBtn.textContent = btnLabel;
+  });
+
+  // ── Remove rows for stations that no longer exist ─────────────────────────
+  for (const [lbl, tr] of Object.entries(existingRows)) {
+    if (!wantedLabels.includes(lbl)) tbody.removeChild(tr);
+  }
+
+  // ── Reorder rows to match state.stations order ────────────────────────────
+  wantedLabels.forEach(lbl => {
+    const tr = existingRows[lbl];
+    if (tr && tbody.lastElementChild !== tr) tbody.appendChild(tr);
+  });
 }
 
 // ---------------------------------------------------------------------------
