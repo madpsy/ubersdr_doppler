@@ -2336,6 +2336,46 @@ async function applySpecInterval(intervalS) {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Saved-password helpers — store/retrieve/clear the UI password in localStorage
+// so the user doesn't have to re-enter it on every page load.
+// ---------------------------------------------------------------------------
+const SAVED_PW_KEY = 'doppler_ui_password';
+
+function savePassword(pw) {
+  try { localStorage.setItem(SAVED_PW_KEY, pw); } catch (_) {}
+}
+
+function loadSavedPassword() {
+  try { return localStorage.getItem(SAVED_PW_KEY) || ''; } catch (_) { return ''; }
+}
+
+function clearSavedPassword() {
+  try { localStorage.removeItem(SAVED_PW_KEY); } catch (_) {}
+}
+
+/**
+ * Attempt a silent login with the saved password.
+ * Returns true if it succeeded, false if the password was wrong or absent.
+ * On failure the stored password is cleared so the user gets a clean login form.
+ */
+async function trySavedPasswordLogin() {
+  const pw = loadSavedPassword();
+  if (!pw) return false;
+  try {
+    await apiFetch('/api/auth/login', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ password: pw }),
+    });
+    return true;
+  } catch (_) {
+    // Wrong password (e.g. it was changed) — discard the stale value
+    clearSavedPassword();
+    return false;
+  }
+}
+
 document.addEventListener('DOMContentLoaded', async () => {
   initCharts();
   if (typeof DopplerMap !== 'undefined') DopplerMap.init();
@@ -2370,6 +2410,15 @@ document.addEventListener('DOMContentLoaded', async () => {
   startHistoryRefreshTicker();
   fetchSDRDescription(); // fire-and-forget — non-blocking
   await checkAuthStatus();
+  // If a password is configured but the session has expired (e.g. server
+  // restart), try the saved password silently before showing the login button.
+  if (state.auth.passwordConfigured && !state.auth.authenticated) {
+    const ok = await trySavedPasswordLogin();
+    if (ok) {
+      state.auth.authenticated = true;
+      updateAuthUI();
+    }
+  }
   await loadSettings();
   await loadStations();
   await loadHistory();
@@ -2407,6 +2456,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       try {
         await apiFetch('/api/auth/logout', { method: 'POST' });
         state.auth.authenticated = false;
+        clearSavedPassword();
         updateAuthUI();
         renderStationList();
       } catch (e) {
@@ -2449,6 +2499,7 @@ document.addEventListener('DOMContentLoaded', async () => {
           body: JSON.stringify({ password: pw }),
         });
         state.auth.authenticated = true;
+        savePassword(pw);
         updateAuthUI();
         renderStationList();
         closeLoginModal();
