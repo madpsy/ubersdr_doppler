@@ -169,6 +169,7 @@ func nextAlignedTick(now time.Time, intervalMins int) time.Time {
 func buildPreviewCSV(
 	dataDir string,
 	settings globalSettings,
+	desc receiverDescription,
 	cfg stationConfig,
 	rangeStart, rangeEnd time.Time,
 ) (data []byte, filename string, err error) {
@@ -271,7 +272,7 @@ func buildPreviewCSV(
 	}
 	grid := cfg.Grid
 	if grid == "" {
-		grid = settings.Grid
+		grid = desc.Maidenhead
 	}
 	if grid == "" {
 		grid = "XX00xx"
@@ -331,11 +332,14 @@ func uploadAllStations(
 	ftpCfg ftpSettings,
 	settingsMu *sync.RWMutex,
 	settings *globalSettings,
+	descCache *receiverDescCache,
 	rangeStart, rangeEnd time.Time,
 ) {
 	settingsMu.RLock()
 	s := *settings
 	settingsMu.RUnlock()
+
+	desc, _ := descCache.Load()
 
 	stations := mgr.list()
 	uploaded := 0
@@ -343,7 +347,7 @@ func uploadAllStations(
 		if !ds.cfg.Enabled {
 			continue
 		}
-		data, fname, err := buildPreviewCSV(mgr.dataDir, s, ds.cfg, rangeStart, rangeEnd)
+		data, fname, err := buildPreviewCSV(mgr.dataDir, s, desc, ds.cfg, rangeStart, rangeEnd)
 		if err != nil {
 			log.Printf("[ftp] %s: build CSV: %v", ds.cfg.Label, err)
 			continue
@@ -376,6 +380,7 @@ func startFTPUploader(
 	settings *globalSettings,
 	settingsMu *sync.RWMutex,
 	ftpCfgPath string,
+	descCache *receiverDescCache,
 ) {
 	log.Printf("[ftp] uploader goroutine started")
 	for {
@@ -432,6 +437,6 @@ func startFTPUploader(
 			rangeStart.UTC().Format("15:04:05"),
 			rangeEnd.UTC().Format("15:04:05"))
 
-		uploadAllStations(mgr, cfg, settingsMu, settings, rangeStart, rangeEnd)
+		uploadAllStations(mgr, cfg, settingsMu, settings, descCache, rangeStart, rangeEnd)
 	}
 }

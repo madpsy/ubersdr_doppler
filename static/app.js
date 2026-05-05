@@ -142,18 +142,19 @@ function specGridText(stationGrid) {
 }
 
 // ---------------------------------------------------------------------------
-// SDR description — fetched from the base domain (origin root) on load.
-// Extracts receiver.gps.maidenhead and receiver.callsign and shows them in
-// the header's #sdr-info badge.
+// SDR description — fetched from our own /api/description proxy on load.
+// The proxy forwards to UberSDR's /api/description and returns a simplified
+// object: { callsign, maidenhead, lat, lon, asl, location, name, public_url }
+// Extracts callsign and maidenhead and shows them in the header's #sdr-info
+// badge as "M9PSY | 📍 IO86ha".
 // ---------------------------------------------------------------------------
 async function fetchSDRDescription() {
   try {
-    const r = await fetch(window.location.origin + '/api/description');
+    const r = await apiFetch('/api/description');
     if (!r.ok) return;
     const d = await r.json();
-    const callsign  = d.receiver && d.receiver.callsign  ? d.receiver.callsign  : null;
-    const maidenhead = d.receiver && d.receiver.gps && d.receiver.gps.maidenhead
-      ? d.receiver.gps.maidenhead : null;
+    const callsign   = d.callsign   || null;
+    const maidenhead = d.maidenhead || null;
     if (callsign)   state.receiverCallsign = callsign;
     if (maidenhead) {
       state.receiverGrid = maidenhead;
@@ -169,7 +170,7 @@ async function fetchSDRDescription() {
     const parts = [];
     if (callsign)   parts.push(`<span class="sdr-callsign">${callsign}</span>`);
     if (maidenhead) parts.push(`<span class="sdr-grid">📍 ${maidenhead}</span>`);
-    el.innerHTML = parts.join('<span style="color:var(--border);margin:0 4px">|</span>');
+    el.innerHTML = parts.join('<span class="sdr-info-sep">|</span>');
     el.style.display = '';
   } catch (e) {
     console.warn('SDR description fetch failed:', e);
@@ -250,12 +251,8 @@ async function loadSettings() {
   try {
     const r = await apiFetch('/api/settings');
     const s = await r.json();
-    document.getElementById('s-callsign').value = s.callsign || '';
-    document.getElementById('s-grid').value = s.grid || '';
-    document.getElementById('s-latitude').value = s.latitude ?? '';
-    document.getElementById('s-longitude').value = s.longitude ?? '';
-    document.getElementById('s-elevation').value = s.elevation_m ?? '';
-    document.getElementById('s-location').value = s.location || '';
+    const nodeEl = document.getElementById('s-node-number');
+    if (nodeEl) nodeEl.value = s.node_number || '';
     const offsetEl = document.getElementById('s-manual-offset');
     if (offsetEl) offsetEl.value = s.manual_offset_hz ?? 0;
     const calOffsetEl = document.getElementById('s-cal-offset');
@@ -2451,13 +2448,9 @@ document.addEventListener('DOMContentLoaded', async () => {
     settingsForm.addEventListener('submit', async e => {
       e.preventDefault();
       const offsetEl = document.getElementById('s-manual-offset');
+      const nodeEl   = document.getElementById('s-node-number');
       const s = {
-        callsign:              document.getElementById('s-callsign').value.trim(),
-        grid:                  document.getElementById('s-grid').value.trim(),
-        latitude:              parseFloat(document.getElementById('s-latitude').value) || 0,
-        longitude:             parseFloat(document.getElementById('s-longitude').value) || 0,
-        elevation_m:           parseFloat(document.getElementById('s-elevation').value) || 0,
-        location:              document.getElementById('s-location').value.trim(),
+        node_number:           nodeEl ? nodeEl.value.trim() : '',
         manual_offset_hz:      offsetEl ? parseFloat(offsetEl.value) || 0 : 0,
         calibration_offset_db: parseFloat(document.getElementById('s-cal-offset')?.value) || 0,
         frequency_reference:   document.getElementById('s-freq-ref').value,

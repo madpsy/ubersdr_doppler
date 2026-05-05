@@ -61,7 +61,7 @@ header {
 .header-left h1 { font-size: 1.3rem; font-weight: 600; }
 .header-left .subtitle { color: var(--muted); font-size: 0.82rem; margin-top: 2px; }
 
-/* SDR info badge (maidenhead + callsign from /api/description) */
+/* SDR info badge — shows "M9PSY | 📍 IO86ha" from /api/description */
 .sdr-info-badge {
   font-size: 0.78rem;
   color: var(--muted);
@@ -75,7 +75,10 @@ header {
 .sdr-info-badge .sdr-callsign {
   color: var(--accent);
   font-weight: 600;
-  margin-right: 6px;
+}
+.sdr-info-badge .sdr-info-sep {
+  color: var(--border);
+  margin: 0 5px;
 }
 .sdr-info-badge .sdr-grid {
   color: var(--green);

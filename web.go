@@ -241,6 +241,8 @@ func startHTTPServer(
 	ftpCfg *ftpSettings,
 	ftpMu *sync.RWMutex,
 	ftpCfgPath string,
+	descCache *receiverDescCache,
+	ubersdrHTTPBase string,
 ) error {
 	sessions := newSessionStore()
 	mux := http.NewServeMux()
@@ -474,7 +476,7 @@ func startHTTPServer(
 				return
 			}
 			cw.UpdateSettings(s)
-			log.Printf("[web] settings updated: freq_ref=%s callsign=%s grid=%s", s.FrequencyReference, s.Callsign, s.Grid)
+			log.Printf("[web] settings updated: freq_ref=%s node=%s", s.FrequencyReference, s.NodeNumber)
 			w.WriteHeader(http.StatusNoContent)
 
 		default:
@@ -968,6 +970,29 @@ func startHTTPServer(
 				}
 			}
 		}
+	})
+
+	// ── Receiver description proxy ─────────────────────────────────────────
+	// GET /api/description — proxies UberSDR's /api/description and caches the
+	// result so the frontend can call BASE+/api/description regardless of whether
+	// it is running behind the addon proxy (where window.location.origin would
+	// point to the doppler addon, not the UberSDR root).
+	mux.HandleFunc("/api/description", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		// Try to refresh the cache on every request (fast — UberSDR is local).
+		// If the refresh fails, serve the stale cached value.
+		if desc, err := fetchReceiverDescription(ubersdrHTTPBase); err == nil {
+			descCache.Store(desc)
+		}
+		desc, ok := descCache.Load()
+		if !ok {
+			http.Error(w, "receiver description not yet available", http.StatusServiceUnavailable)
+			return
+		}
+		jsonResponse(w, desc)
 	})
 
 	// ── FTP settings endpoints (all auth-gated) ────────────────────────────

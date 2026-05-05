@@ -1,8 +1,12 @@
 // main.go — ubersdr_doppler: HamSCI Doppler shift monitor
 //
 // Stations are persisted to stations.json inside the data directory.
-// Global settings (callsign, grid, frequency reference type) are persisted
-// to settings.json. Both are editable via the web UI.
+// Global settings (frequency reference type etc.) are persisted to
+// settings.json and editable via the web UI.
+//
+// Receiver identity (callsign, grid, lat/lon, elevation, location) is
+// fetched automatically from the UberSDR /api/description endpoint and
+// does not need to be entered manually.
 //
 // Usage:
 //
@@ -17,11 +21,14 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"net/http"
 	"os"
 	"os/signal"
 	"strconv"
+	"strings"
 	"sync"
 	"syscall"
+	"time"
 )
 
 func envOr(key, def string) string {
@@ -65,16 +72,13 @@ func main() {
 	log.Printf("[main] Data dir    : %s", *dataDir)
 	log.Printf("[main] Listen addr : %s", *listenAddr)
 
-	// Load global settings (callsign, grid, frequency reference type)
+	// Load global settings (frequency reference type, calibration offsets, etc.)
 	settingsPath := *dataDir + "/settings.json"
 	settings, err := loadGlobalSettings(settingsPath)
 	if err != nil {
 		log.Printf("[main] warning: could not load settings.json: %v — using defaults", err)
 	}
 	log.Printf("[main] Frequency ref: %s", settings.FrequencyReference)
-	if settings.Callsign != "" {
-		log.Printf("[main] Callsign    : %s  Grid: %s", settings.Callsign, settings.Grid)
-	}
 
 	// settingsMu protects settings when updated via the web UI at runtime.
 	var settingsMu sync.RWMutex
@@ -85,9 +89,28 @@ func main() {
 	// SSE hub for pushing live updates to browsers
 	hub := newSSEHub()
 
+	// Receiver description cache — populated by fetching /api/description from UberSDR.
+	// This provides callsign, grid, lat/lon, elevation and location without manual entry.
+	var descCache receiverDescCache
+
+	// Derive the UberSDR HTTP base URL from the WebSocket URL.
+	// ws://host:port/ws  →  http://host:port
+	// wss://host:port/ws →  https://host:port
+	httpBase := wsURLToHTTPBase(*ubersdrURL)
+	log.Printf("[main] UberSDR HTTP : %s", httpBase)
+
+	// Fetch description immediately at startup (best-effort; non-fatal if unavailable).
+	if desc, err := fetchReceiverDescription(httpBase); err != nil {
+		log.Printf("[main] description fetch: %v (will retry in background)", err)
+	} else {
+		descCache.Store(desc)
+		log.Printf("[main] Receiver     : %s  Grid: %s  Lat: %.4f  Lon: %.4f",
+			desc.Callsign, desc.Maidenhead, desc.Lat, desc.Lon)
+	}
+
 	// CSV writer (uses global settings for frequency_reference column)
 	settingsMu.RLock()
-	cw := newCSVWriter(*dataDir, settings)
+	cw := newCSVWriter(*dataDir, settings, &descCache)
 	settingsMu.RUnlock()
 
 	// Station manager — loads stations.json, manages running DopplerStations
@@ -110,7 +133,7 @@ func main() {
 
 	// HTTP server
 	go func() {
-		if err := startHTTPServer(*listenAddr, mgr, hub, settingsPath, &settings, &settingsMu, cw, *uiPassword, &ftpCfg, &ftpMu, ftpCfgPath); err != nil {
+		if err := startHTTPServer(*listenAddr, mgr, hub, settingsPath, &settings, &settingsMu, cw, *uiPassword, &ftpCfg, &ftpMu, ftpCfgPath, &descCache, httpBase); err != nil {
 			log.Fatalf("[main] HTTP server: %v", err)
 		}
 	}()
@@ -119,7 +142,26 @@ func main() {
 	mgr.startAll(ctx)
 
 	// FTP uploader goroutine — runs independently, re-reads config on each tick
-	go startFTPUploader(ctx, mgr, &ftpCfg, &ftpMu, &settings, &settingsMu, ftpCfgPath)
+	go startFTPUploader(ctx, mgr, &ftpCfg, &ftpMu, &settings, &settingsMu, ftpCfgPath, &descCache)
+
+	// Background description refresh — re-fetches every 5 minutes so the
+	// cached receiver identity stays current if the SDR is reconfigured.
+	go func() {
+		ticker := time.NewTicker(5 * time.Minute)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				if desc, err := fetchReceiverDescription(httpBase); err != nil {
+					log.Printf("[main] description refresh: %v", err)
+				} else {
+					descCache.Store(desc)
+				}
+			}
+		}
+	}()
 
 	// Wait for SIGINT / SIGTERM
 	sig := make(chan os.Signal, 1)
@@ -157,27 +199,115 @@ const (
 )
 
 // ---------------------------------------------------------------------------
+// receiverDescription — live data from UberSDR /api/description
+// ---------------------------------------------------------------------------
+
+// receiverDescription holds the subset of UberSDR's /api/description response
+// that ubersdr_doppler needs for CSV metadata and the UI header badge.
+type receiverDescription struct {
+	Callsign   string  `json:"callsign"`
+	Maidenhead string  `json:"maidenhead"`
+	Lat        float64 `json:"lat"`
+	Lon        float64 `json:"lon"`
+	ASL        float64 `json:"asl"`        // metres above sea level
+	Location   string  `json:"location"`   // free-text location string
+	Name       string  `json:"name"`       // SDR name
+	PublicURL  string  `json:"public_url"` // public URL of the SDR
+}
+
+// receiverDescCache is a thread-safe cache for the latest receiverDescription.
+type receiverDescCache struct {
+	mu   sync.RWMutex
+	desc *receiverDescription
+}
+
+func (c *receiverDescCache) Store(d receiverDescription) {
+	c.mu.Lock()
+	c.desc = &d
+	c.mu.Unlock()
+}
+
+func (c *receiverDescCache) Load() (receiverDescription, bool) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	if c.desc == nil {
+		return receiverDescription{}, false
+	}
+	return *c.desc, true
+}
+
+// fetchReceiverDescription fetches /api/description from the UberSDR HTTP base URL
+// and extracts the receiver identity fields.
+func fetchReceiverDescription(httpBase string) (receiverDescription, error) {
+	resp, err := http.Get(httpBase + "/api/description")
+	if err != nil {
+		return receiverDescription{}, fmt.Errorf("GET /api/description: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return receiverDescription{}, fmt.Errorf("GET /api/description: status %d", resp.StatusCode)
+	}
+
+	// Parse only the fields we need from the (potentially large) response.
+	var raw struct {
+		Receiver struct {
+			Callsign string `json:"callsign"`
+			GPS      struct {
+				Lat        float64 `json:"lat"`
+				Lon        float64 `json:"lon"`
+				Maidenhead string  `json:"maidenhead"`
+			} `json:"gps"`
+			ASL      float64 `json:"asl"`
+			Location string  `json:"location"`
+			Name     string  `json:"name"`
+		} `json:"receiver"`
+		PublicURL string `json:"public_url"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&raw); err != nil {
+		return receiverDescription{}, fmt.Errorf("decode /api/description: %w", err)
+	}
+
+	return receiverDescription{
+		Callsign:   raw.Receiver.Callsign,
+		Maidenhead: raw.Receiver.GPS.Maidenhead,
+		Lat:        raw.Receiver.GPS.Lat,
+		Lon:        raw.Receiver.GPS.Lon,
+		ASL:        raw.Receiver.ASL,
+		Location:   raw.Receiver.Location,
+		Name:       raw.Receiver.Name,
+		PublicURL:  raw.PublicURL,
+	}, nil
+}
+
+// wsURLToHTTPBase converts a WebSocket URL to an HTTP base URL.
+// ws://host:port/path  →  http://host:port
+// wss://host:port/path →  https://host:port
+func wsURLToHTTPBase(wsURL string) string {
+	s := wsURL
+	if len(s) >= 6 && s[:6] == "wss://" {
+		s = "https://" + s[6:]
+	} else if len(s) >= 5 && s[:5] == "ws://" {
+		s = "http://" + s[5:]
+	}
+	// Strip path — keep only scheme://host:port
+	if idx := strings.Index(s[8:], "/"); idx >= 0 {
+		s = s[:8+idx]
+	}
+	return s
+}
+
+// ---------------------------------------------------------------------------
 // globalSettings — stored in settings.json
 // ---------------------------------------------------------------------------
 
 // globalSettings holds operator and hardware configuration that applies to all stations.
+// Receiver identity (callsign, grid, lat/lon, elevation, location) is sourced
+// automatically from UberSDR's /api/description and is NOT stored here.
 type globalSettings struct {
-	// Operator identity — used as defaults for all stations (can be overridden per-station)
-	Callsign string `json:"callsign"` // Amateur radio callsign, e.g. "G0XYZ"
-	Grid     string `json:"grid"`     // Maidenhead grid locator, e.g. "IO91wm"
-
 	// HamSCI Grape node number — assigned by HamSCI for registered stations
 	// Format: "N00001" (6 chars). Leave empty if not registered.
 	// Register at: https://hamsci.org/grape-node-registration
 	NodeNumber string `json:"node_number"`
-
-	// Physical location of the receiver — written into the Grape CSV header.
-	// Latitude and Longitude in decimal degrees (WGS84). Elevation in metres.
-	// Location is a free-text city/state/country description, e.g. "Macedonia Ohio".
-	Latitude   float64 `json:"latitude"`
-	Longitude  float64 `json:"longitude"`
-	ElevationM float64 `json:"elevation_m"`
-	Location   string  `json:"location"`
 
 	// Frequency reference type — affects CSV quality flag and UI display
 	// Values: "none", "gpsdo", "reference_station"

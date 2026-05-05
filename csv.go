@@ -33,6 +33,7 @@ import (
 type csvWriter struct {
 	dataDir  string
 	settings globalSettings
+	desc     *receiverDescCache // live receiver identity from UberSDR /api/description
 	mu       sync.Mutex
 	// open file handles keyed by "<label>/<YYYY-MM-DD>"
 	handles map[string]*csvHandle
@@ -44,10 +45,11 @@ type csvHandle struct {
 	openedAt time.Time
 }
 
-func newCSVWriter(dataDir string, settings globalSettings) *csvWriter {
+func newCSVWriter(dataDir string, settings globalSettings, desc *receiverDescCache) *csvWriter {
 	return &csvWriter{
 		dataDir:  dataDir,
 		settings: settings,
+		desc:     desc,
 		handles:  make(map[string]*csvHandle),
 	}
 }
@@ -139,14 +141,14 @@ func dbfsToVpk(dbfs float32, calibrationOffsetDB float64) float32 {
 // grapeFilename builds the Grape-standard filename for a station/day.
 // Format: YYYY-MM-DDTHH:MM:SSZ_<node>_<radio>_<grid>_FRQ_<station>.csv
 // where HH:MM:SSZ is the UTC time the file was first opened.
-func grapeFilename(cfg stationConfig, settings globalSettings, openedAt time.Time) string {
+func grapeFilename(cfg stationConfig, settings globalSettings, desc receiverDescription, openedAt time.Time) string {
 	node := settings.NodeNumber
 	if node == "" {
 		node = "N00000"
 	}
 	grid := cfg.Grid
 	if grid == "" {
-		grid = settings.Grid
+		grid = desc.Maidenhead
 	}
 	if grid == "" {
 		grid = "XX00xx"
@@ -163,18 +165,18 @@ func grapeFilename(cfg stationConfig, settings globalSettings, openedAt time.Tim
 // First-line format follows the HamSCI Grape Gen 1 convention:
 //
 //	#,<timestamp>,<node>,<grid>,<lat>,<lon>,<elev>,<location>,G1,<beacon>
-func grapeHeader(cfg stationConfig, settings globalSettings, openedAt time.Time) string {
+func grapeHeader(cfg stationConfig, settings globalSettings, desc receiverDescription, openedAt time.Time) string {
 	node := settings.NodeNumber
 	if node == "" {
 		node = "N00000"
 	}
 	callsign := cfg.Callsign
 	if callsign == "" {
-		callsign = settings.Callsign
+		callsign = desc.Callsign
 	}
 	grid := cfg.Grid
 	if grid == "" {
-		grid = settings.Grid
+		grid = desc.Maidenhead
 	}
 
 	freqRef := string(settings.FrequencyReference)
@@ -186,13 +188,13 @@ func grapeHeader(cfg stationConfig, settings globalSettings, openedAt time.Time)
 
 	// Format lat/lon/elev for the first line.
 	// Use up to 7 decimal places for lat/lon (sub-metre precision), strip trailing zeros.
-	latStr := strconv.FormatFloat(settings.Latitude, 'f', 7, 64)
-	lonStr := strconv.FormatFloat(settings.Longitude, 'f', 7, 64)
-	elvStr := strconv.FormatFloat(settings.ElevationM, 'f', 1, 64)
+	latStr := strconv.FormatFloat(desc.Lat, 'f', 7, 64)
+	lonStr := strconv.FormatFloat(desc.Lon, 'f', 7, 64)
+	elvStr := strconv.FormatFloat(desc.ASL, 'f', 1, 64)
 
 	var sb strings.Builder
 	sb.WriteString(fmt.Sprintf("#,%s,%s,%s,%s,%s,%s,%s,G1,%s\n",
-		ts, node, grid, latStr, lonStr, elvStr, settings.Location, cfg.Label))
+		ts, node, grid, latStr, lonStr, elvStr, desc.Location, cfg.Label))
 	sb.WriteString("#######################################\n")
 	sb.WriteString("# MetaData for UberSDR Doppler Station\n")
 	sb.WriteString("#\n")
@@ -200,7 +202,7 @@ func grapeHeader(cfg stationConfig, settings globalSettings, openedAt time.Time)
 	sb.WriteString(fmt.Sprintf("# Callsign                 %s\n", callsign))
 	sb.WriteString(fmt.Sprintf("# Grid Square              %s\n", grid))
 	sb.WriteString(fmt.Sprintf("# Lat, Long, Elv           %s, %s, %s\n", latStr, lonStr, elvStr))
-	sb.WriteString(fmt.Sprintf("# City State               %s\n", settings.Location))
+	sb.WriteString(fmt.Sprintf("# City State               %s\n", desc.Location))
 	sb.WriteString(fmt.Sprintf("# Beacon Now Decoded       %s\n", cfg.Label))
 	sb.WriteString(fmt.Sprintf("# Nominal Frequency        %d Hz\n", cfg.FreqHz))
 	sb.WriteString(fmt.Sprintf("# Frequency Standard       %s\n", freqRef))
@@ -234,8 +236,11 @@ func (cw *csvWriter) getHandle(key string, cfg stationConfig, day string, opened
 		return nil, err
 	}
 
+	// Resolve current receiver description (use zero value if not yet available)
+	desc, _ := cw.desc.Load()
+
 	// Grape filename
-	fname := grapeFilename(cfg, cw.settings, openedAt)
+	fname := grapeFilename(cfg, cw.settings, desc, openedAt)
 	path := filepath.Join(dir, fname)
 
 	isNew := false
@@ -249,7 +254,7 @@ func (cw *csvWriter) getHandle(key string, cfg stationConfig, day string, opened
 	}
 
 	if isNew {
-		header := grapeHeader(cfg, cw.settings, openedAt)
+		header := grapeHeader(cfg, cw.settings, desc, openedAt)
 		if _, err := f.WriteString(header); err != nil {
 			f.Close()
 			return nil, err
