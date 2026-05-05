@@ -32,7 +32,7 @@ type ftpSettings struct {
 
 	// IntervalMins is how often (in minutes) to upload preview CSVs.
 	// Uploads are aligned to clock boundaries (e.g. :00, :15, :30, :45 UTC).
-	// Default: 15.  Accepted values: 1, 5, 10, 15, 30, 60.
+	// Default: 15.  Accepted values: 1, 5, 10, 15, 30, 60, 360, 720, 1440.
 	IntervalMins int `json:"interval_mins"`
 
 	// WindowMins is the time span of data included in each preview CSV.

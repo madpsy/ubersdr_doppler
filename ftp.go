@@ -141,16 +141,29 @@ func testFTPConnection(cfg ftpSettings) FTPTestResult {
 // ---------------------------------------------------------------------------
 
 // nextAlignedTick returns the next UTC time that is a multiple of intervalMins
-// from the start of the current UTC hour.  For example, with intervalMins=15
-// and current time 18:07 UTC, it returns 18:15 UTC.
+// from a suitable epoch anchor:
+//   - intervals < 60 min  → anchor = start of current UTC hour
+//   - intervals >= 60 min → anchor = start of current UTC day (midnight)
+//
+// Examples:
+//
+//	intervalMins=15, now=18:07 → 18:15
+//	intervalMins=360, now=07:30 → 12:00
+//	intervalMins=1440, now=07:30 → 00:00 next day
 func nextAlignedTick(now time.Time, intervalMins int) time.Time {
 	if intervalMins <= 0 {
 		intervalMins = 15
 	}
-	// Truncate to the start of the current UTC hour
-	hourStart := time.Date(now.Year(), now.Month(), now.Day(), now.Hour(), 0, 0, 0, time.UTC)
-	// Find the next boundary after now
-	for t := hourStart; ; t = t.Add(time.Duration(intervalMins) * time.Minute) {
+	var anchor time.Time
+	if intervalMins < 60 {
+		// Anchor to start of current UTC hour
+		anchor = time.Date(now.Year(), now.Month(), now.Day(), now.Hour(), 0, 0, 0, time.UTC)
+	} else {
+		// Anchor to start of current UTC day (midnight)
+		anchor = time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.UTC)
+	}
+	// Find the next boundary strictly after now
+	for t := anchor; ; t = t.Add(time.Duration(intervalMins) * time.Minute) {
 		next := t.Add(time.Duration(intervalMins) * time.Minute)
 		if next.After(now) {
 			return next
