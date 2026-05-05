@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
 	"strconv"
@@ -283,17 +284,29 @@ func fetchReceiverDescription(httpBase string) (receiverDescription, error) {
 // ws://host:port/path  →  http://host:port
 // wss://host:port/path →  https://host:port
 func wsURLToHTTPBase(wsURL string) string {
-	s := wsURL
-	if len(s) >= 6 && s[:6] == "wss://" {
-		s = "https://" + s[6:]
-	} else if len(s) >= 5 && s[:5] == "ws://" {
-		s = "http://" + s[5:]
+	u, err := url.Parse(wsURL)
+	if err != nil {
+		// Fallback: simple string replacement
+		s := wsURL
+		if strings.HasPrefix(s, "wss://") {
+			s = "https://" + s[6:]
+		} else if strings.HasPrefix(s, "ws://") {
+			s = "http://" + s[5:]
+		}
+		return s
 	}
-	// Strip path — keep only scheme://host:port
-	if idx := strings.Index(s[8:], "/"); idx >= 0 {
-		s = s[:8+idx]
+	switch u.Scheme {
+	case "wss":
+		u.Scheme = "https"
+	case "ws":
+		u.Scheme = "http"
 	}
-	return s
+	// Keep only scheme + host (strip path, query, fragment)
+	u.Path = ""
+	u.RawPath = ""
+	u.RawQuery = ""
+	u.Fragment = ""
+	return u.String()
 }
 
 // ---------------------------------------------------------------------------

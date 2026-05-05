@@ -122,9 +122,19 @@ window.DopplerMap = (() => {
   }
 
   // ── Receiver marker ─────────────────────────────────────────────────────────
+  // Uses precise GPS lat/lon from state.receiverLat/Lon when available (sourced
+  // from UberSDR /api/description), falling back to Maidenhead grid conversion.
   function updateRxMarker(rxGrid) {
-    if (!rxGrid) return;
-    const pos = maidenheadToLatLon(rxGrid);
+    // Resolve position: prefer precise GPS, fall back to grid centre
+    let pos = null;
+    const hasGPS = (typeof state !== 'undefined' &&
+                    typeof state.receiverLat === 'number' &&
+                    typeof state.receiverLon === 'number');
+    if (hasGPS) {
+      pos = { lat: state.receiverLat, lon: state.receiverLon };
+    } else if (rxGrid) {
+      pos = maidenheadToLatLon(rxGrid);
+    }
     if (!pos) return;
 
     const callsign = (typeof state !== 'undefined' && state.receiverCallsign)
@@ -133,13 +143,18 @@ window.DopplerMap = (() => {
     const callsignRow = callsign
       ? `<div class="map-popup-row"><span class="map-popup-label">Callsign</span><span>${callsign}</span></div>`
       : '';
+    const gridRow = rxGrid
+      ? `<div class="map-popup-row"><span class="map-popup-label">Grid</span><span>${rxGrid}</span></div>`
+      : '';
+    // Show GPS precision indicator when using exact coords
+    const coordLabel = hasGPS ? 'GPS Lat/Lon' : 'Lat/Lon (grid)';
 
     const popupHtml = `
       <div class="map-popup">
         <div class="map-popup-title" style="color:#f0c040">${titleText}</div>
         ${callsignRow}
-        <div class="map-popup-row"><span class="map-popup-label">Grid</span><span>${rxGrid}</span></div>
-        <div class="map-popup-row"><span class="map-popup-label">Lat/Lon</span><span>${pos.lat.toFixed(3)}°, ${pos.lon.toFixed(3)}°</span></div>
+        ${gridRow}
+        <div class="map-popup-row"><span class="map-popup-label">${coordLabel}</span><span>${pos.lat.toFixed(4)}°, ${pos.lon.toFixed(4)}°</span></div>
       </div>`;
 
     if (rxMarker) {
@@ -163,8 +178,16 @@ window.DopplerMap = (() => {
   }
 
   function buildStationLayers(stations, rxGrid) {
-    if (!rxGrid) return;
-    const rxPos = maidenheadToLatLon(rxGrid);
+    // Prefer precise GPS coords for path/hop calculations; fall back to grid centre
+    let rxPos = null;
+    const hasGPS = (typeof state !== 'undefined' &&
+                    typeof state.receiverLat === 'number' &&
+                    typeof state.receiverLon === 'number');
+    if (hasGPS) {
+      rxPos = { lat: state.receiverLat, lon: state.receiverLon };
+    } else if (rxGrid) {
+      rxPos = maidenheadToLatLon(rxGrid);
+    }
     if (!rxPos) return;
 
     stations.forEach((s, idx) => {

@@ -52,6 +52,8 @@ const state = {
   lastServerTime: {},    // label → Date
   receiverGrid: null,      // Maidenhead locator from /api/description (receiver position)
   receiverCallsign: null,  // Callsign from /api/description
+  receiverLat: null,       // Precise GPS latitude from /api/description (degrees)
+  receiverLon: null,       // Precise GPS longitude from /api/description (degrees)
 };
 
 // Staleness threshold: if no SSE message has arrived for a station in this many
@@ -155,13 +157,20 @@ async function fetchSDRDescription() {
     const d = await r.json();
     const callsign   = d.callsign   || null;
     const maidenhead = d.maidenhead || null;
+    const lat        = (typeof d.lat === 'number' && d.lat !== 0) ? d.lat : null;
+    const lon        = (typeof d.lon === 'number' && d.lon !== 0) ? d.lon : null;
     if (callsign)   state.receiverCallsign = callsign;
+    if (lat !== null) state.receiverLat = lat;
+    if (lon !== null) state.receiverLon = lon;
     if (maidenhead) {
       state.receiverGrid = maidenhead;
       updateSpecGridBadges(); // update any already-rendered spectrum panels
       // Redraw doppler chart so sun lines appear now that receiver grid is known
       if (state.dopplerChart) state.dopplerChart.update('none');
       // Update map with receiver position
+      if (typeof DopplerMap !== 'undefined') DopplerMap.update();
+    } else if (lat !== null && lon !== null) {
+      // No grid but we have GPS coords — still update the map
       if (typeof DopplerMap !== 'undefined') DopplerMap.update();
     }
     const el = document.getElementById('sdr-info');
@@ -1075,9 +1084,15 @@ const sunLinePlugin = {
     const yScale = chart.scales.y;
     if (!xScale || !yScale) return;
 
-    const rxGrid = state.receiverGrid;
-    if (!rxGrid) return;
-    const rxPos = maidenheadToLatLon(rxGrid);
+    // Prefer precise GPS coords; fall back to Maidenhead grid centre
+    let rxPos = null;
+    if (typeof state.receiverLat === 'number' && typeof state.receiverLon === 'number') {
+      rxPos = { lat: state.receiverLat, lon: state.receiverLon };
+    } else {
+      const rxGrid = state.receiverGrid;
+      if (!rxGrid) return;
+      rxPos = maidenheadToLatLon(rxGrid);
+    }
     if (!rxPos) return;
 
     const win = chartWindowRange();
