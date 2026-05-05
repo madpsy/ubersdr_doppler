@@ -2159,7 +2159,7 @@ function openModal(title, cfg = {}) {
   document.getElementById('f-callsign').value = cfg.callsign || '';
   document.getElementById('f-grid').value = cfg.grid || '';
   document.getElementById('f-min-snr').value = cfg.min_snr ?? 10;
-  document.getElementById('f-max-drift').value = cfg.max_drift_hz ?? 50;
+  document.getElementById('f-max-drift').value = cfg.max_drift_hz ?? 5;
   document.getElementById('f-max-bw').value = cfg.max_signal_bw_hz || 4;
   document.getElementById('f-local-snr-window').value = cfg.local_snr_window_hz || 10;
   document.getElementById('f-enabled').checked = cfg.enabled !== false;

@@ -413,7 +413,7 @@ type stationConfig struct {
 func defaultStationConfig() stationConfig {
 	return stationConfig{
 		MinSNR:           10.0,
-		MaxDriftHz:       50.0, // spectrum window is ±50 Hz (200 bins × 0.5 Hz/bin)
+		MaxDriftHz:       5.0, // ±5 Hz covers typical Doppler + oscillator drift
 		MaxSignalBWHz:    4.0,
 		LocalSNRWindowHz: 10.0,
 		Enabled:          true,
