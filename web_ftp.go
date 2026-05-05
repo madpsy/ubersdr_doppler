@@ -90,6 +90,21 @@ func registerFTPHandlers(
 			return
 		}
 		result := testFTPConnection(cfg)
+		if result.OK {
+			log.Printf("[ftp/test] connection test passed: host=%s port=%d tls=%v user=%s",
+				cfg.Host, cfg.Port, cfg.TLS, cfg.Username)
+		} else {
+			// Find the first failed step for a concise error message
+			failDetail := "unknown"
+			for _, s := range result.Steps {
+				if s.Status == "error" {
+					failDetail = s.Step + ": " + s.Detail
+					break
+				}
+			}
+			log.Printf("[ftp/test] connection test FAILED: host=%s port=%d tls=%v user=%s — %s",
+				cfg.Host, cfg.Port, cfg.TLS, cfg.Username, failDetail)
+		}
 		jsonResponse(w, result)
 	})
 }
