@@ -1667,11 +1667,15 @@ async function loadHistory() {
   // When a specific date is selected, fetch that UTC day; otherwise use rolling window.
   const usingDate = state.chartDate !== '';
   const cutoff = usingDate ? 0 : Date.now() - state.historyHours * 3600 * 1000;
-  state.dopplerChart.data.datasets = [];
-  state.snrChart.data.datasets = [];
-  state.powerChart.data.datasets = [];
-  if (state.vpkChart) state.vpkChart.data.datasets = [];
-  state.chartDatasets = {};
+
+  // Build new datasets into temporary arrays first, then swap them in atomically.
+  // This prevents appendLivePoint() (called from SSE events) from seeing a partially-
+  // rebuilt state.chartDatasets and creating duplicate datasets mid-rebuild.
+  const newDopplerDatasets = [];
+  const newSnrDatasets = [];
+  const newPowerDatasets = [];
+  const newVpkDatasets = [];
+  const newChartDatasets = {};
 
   for (let i = 0; i < state.stations.length; i++) {
     const s = state.stations[i];
@@ -1766,8 +1770,9 @@ async function loadHistory() {
       }
 
       // Push min band (lower boundary), then max band (upper boundary, fills down to min)
-      const dMinIdx = state.dopplerChart.data.datasets.length;
-      state.dopplerChart.data.datasets.push({
+      // into the local staging arrays so indices are consistent within this rebuild.
+      const dMinIdx = newDopplerDatasets.length;
+      newDopplerDatasets.push({
         label: label + ' min',
         data: dopplerMinPoints,
         borderColor: 'transparent',
@@ -1776,8 +1781,8 @@ async function loadHistory() {
         fill: '+1', // fill between this dataset and the next (max)
         _isBand: true,
       });
-      const dMaxIdx = state.dopplerChart.data.datasets.length;
-      state.dopplerChart.data.datasets.push({
+      const dMaxIdx = newDopplerDatasets.length;
+      newDopplerDatasets.push({
         label: label + ' max',
         data: dopplerMaxPoints,
         borderColor: 'transparent',
@@ -1786,41 +1791,50 @@ async function loadHistory() {
         fill: false,
         _isBand: true,
       });
-      const dIdx = state.dopplerChart.data.datasets.length;
-      state.dopplerChart.data.datasets.push({
+      const dIdx = newDopplerDatasets.length;
+      newDopplerDatasets.push({
         label, data: dopplerPoints,
         borderColor: colour, backgroundColor: 'transparent',
         borderWidth: 1.5, pointRadius: 0, tension: 0.15, spanGaps: false,
       });
 
-      const sIdx = state.snrChart.data.datasets.length;
-      state.snrChart.data.datasets.push({
+      const sIdx = newSnrDatasets.length;
+      newSnrDatasets.push({
         label, data: snrPoints,
         borderColor: colour, backgroundColor: colour + '22', fill: true,
         borderWidth: 1, pointRadius: 0, tension: 0.15, spanGaps: false,
       });
 
-      const pIdx = state.powerChart.data.datasets.length;
-      state.powerChart.data.datasets.push({
+      const pIdx = newPowerDatasets.length;
+      newPowerDatasets.push({
         label, data: powerPoints,
         borderColor: colour, backgroundColor: colour + '22', fill: true,
         borderWidth: 1, pointRadius: 0, tension: 0.15, spanGaps: false,
       });
 
-      const vIdx = state.vpkChart ? state.vpkChart.data.datasets.length : 0;
-      if (state.vpkChart) {
-        state.vpkChart.data.datasets.push({
-          label, data: vpkPoints,
-          borderColor: colour, backgroundColor: colour + '22', fill: true,
-          borderWidth: 1, pointRadius: 0, tension: 0.15, spanGaps: false,
-        });
-      }
+      const vIdx = newVpkDatasets.length;
+      newVpkDatasets.push({
+        label, data: vpkPoints,
+        borderColor: colour, backgroundColor: colour + '22', fill: true,
+        borderWidth: 1, pointRadius: 0, tension: 0.15, spanGaps: false,
+      });
 
-      state.chartDatasets[label] = { doppler: dIdx, dMin: dMinIdx, dMax: dMaxIdx, snr: sIdx, power: pIdx, vpk: vIdx };
+      newChartDatasets[label] = { doppler: dIdx, dMin: dMinIdx, dMax: dMaxIdx, snr: sIdx, power: pIdx, vpk: vIdx };
     } catch (e) {
       console.warn('history load failed for', label, e);
     }
   }
+
+  // Atomically swap all chart datasets and the index map in one synchronous block.
+  // Any appendLivePoint() calls that arrive via SSE between the awaits above will
+  // have used the old state.chartDatasets (still valid for the old arrays).  After
+  // this swap both the arrays and the index map are consistent, so the next SSE
+  // event will correctly append to the new datasets.
+  state.dopplerChart.data.datasets = newDopplerDatasets;
+  state.snrChart.data.datasets     = newSnrDatasets;
+  state.powerChart.data.datasets   = newPowerDatasets;
+  if (state.vpkChart) state.vpkChart.data.datasets = newVpkDatasets;
+  state.chartDatasets = newChartDatasets;
 
   updateDopplerChartAxis();
   applyBandVisibility();
@@ -2510,6 +2524,16 @@ document.addEventListener('DOMContentLoaded', async () => {
   // ── FTP settings form ────────────────────────────────────────────────────
   const ftpForm = document.getElementById('ftp-form');
   if (ftpForm) {
+    // When the upload interval changes, auto-sync the data window to match —
+    // the user can still override it manually afterwards.
+    const ftpIntervalEl = document.getElementById('ftp-interval');
+    const ftpWindowEl   = document.getElementById('ftp-window');
+    if (ftpIntervalEl && ftpWindowEl) {
+      ftpIntervalEl.addEventListener('change', () => {
+        ftpWindowEl.value = ftpIntervalEl.value;
+      });
+    }
+
     ftpForm.addEventListener('submit', async e => {
       e.preventDefault();
       const cfg = {
