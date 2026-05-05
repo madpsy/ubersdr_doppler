@@ -278,6 +278,14 @@ const (
 	specBinCount     = 200
 	specBinBandwidth = 0.5 // Hz/bin — 4× finer than UberSDR FrequencyReferenceMonitor default
 
+	// maxSignalBandwidthHz is the maximum 3 dB bandwidth a valid carrier signal
+	// may occupy.  A real CW/time-signal carrier is spectrally very narrow
+	// (typically 1–2 bins at 0.5 Hz/bin).  Wideband noise bursts that happen to
+	// produce a local peak will span many more bins and are rejected by this gate.
+	// 4 Hz gives comfortable margin for slight FFT leakage while still rejecting
+	// noise that spans tens of Hz.
+	maxSignalBandwidthHz = 4.0 // Hz — reject peaks whose 3 dB width exceeds this
+
 	// History depth for minute-means (24 hours × 60 minutes).
 	historyDepth = 24 * 60
 
@@ -1189,6 +1197,15 @@ func detectDopplerWithPeak(bins []float32, binBandwidth, minSNR, maxDriftHz floa
 	}
 	for i := peakBin + 1; i < n && bins[i] >= threshold; i++ {
 		endBin = i
+	}
+
+	// Spectral width gate: reject peaks whose 3 dB bandwidth exceeds
+	// maxSignalBandwidthHz.  A real CW carrier is spectrally very narrow
+	// (1–2 bins at 0.5 Hz/bin); a 20 Hz noise burst will span 40+ bins and
+	// is rejected here even if its peak clears the SNR threshold.
+	bwHz := float64(endBin-startBin+1) * binBandwidth
+	if bwHz > maxSignalBandwidthHz {
+		return DopplerReading{SNR: snr, SignalDBFS: peakPower, NoiseDBFS: noiseFloor, Valid: false}, -1
 	}
 
 	var weightedSum, totalWeight float64
