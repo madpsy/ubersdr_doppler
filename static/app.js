@@ -34,7 +34,7 @@ const state = {
   showSNR: true,
   showPower: true,
   showBand: true,    // show min/max jitter band on doppler history chart
-  showMissing: true, // show 'No signal' gap bands on doppler history chart
+  showMissing: false, // show 'No signal' gap bands on doppler history chart
   showRef: false,    // show reference station on history charts (off by default)
   showMidpointSun: true, // show sunrise/sunset lines at path midpoint on history chart
   chartMode: 'doppler',  // 'doppler' | 'absolute'
