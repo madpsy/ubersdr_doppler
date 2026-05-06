@@ -123,18 +123,19 @@ func (cw *csvWriter) write(cfg stationConfig, m MinuteMean, correctedHz *float64
 	cw.writeReading(cfg, r)
 }
 
-// dbfsToVpk converts a dBFS power level to an approximate peak voltage (0–1 scale).
-// calibrationOffsetDB is added to dBFS before conversion (positive = boost, negative = cut).
-// dBFS 0 = full scale = Vpk 1.0; dBFS -60 = Vpk ~0.001
+// dbfsToVpk converts a dBFS power level to a calibrated peak voltage amplitude.
+// calibrationOffsetDB encodes real-world system gain/loss (antenna, cable, preamp, SDR gain)
+// and is added to dBFS before conversion (positive = boost, negative = cut).
+// With cal=0: dBFS 0 → Vpk 1.0 (ADC full scale), dBFS -60 → Vpk ~0.001.
+// A positive calibration offset can produce Vpk > 1.0.
 func dbfsToVpk(dbfs float32, calibrationOffsetDB float64) float32 {
 	if math.IsNaN(float64(dbfs)) || math.IsInf(float64(dbfs), 0) {
 		return 0
 	}
 	// Apply calibration offset then convert dBFS to linear amplitude: Vpk = 10^((dBFS+cal)/20)
+	// calibrationOffsetDB encodes real-world system gain (antenna, cable, preamp, SDR gain),
+	// so Vpk can exceed 1.0 when the calibrated signal level is above ADC full scale equivalent.
 	vpk := math.Pow(10.0, (float64(dbfs)+calibrationOffsetDB)/20.0)
-	if vpk > 1.0 {
-		vpk = 1.0
-	}
 	return float32(vpk)
 }
 

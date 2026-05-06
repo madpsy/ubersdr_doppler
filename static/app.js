@@ -1927,7 +1927,7 @@ async function loadHistory() {
         snrPoints.push({ x: new Date(m.timestamp), y: m.snr_db });
         powerPoints.push({ x: new Date(m.timestamp), y: m.signal_dbfs });
         const vpkVal = m.signal_dbfs != null
-          ? Math.min(1.0, Math.pow(10, (m.signal_dbfs + state.calibrationOffsetDB) / 20))
+          ? Math.pow(10, (m.signal_dbfs + state.calibrationOffsetDB) / 20)
           : null;
         vpkPoints.push({ x: new Date(m.timestamp), y: vpkVal });
       }
@@ -2108,7 +2108,7 @@ function appendLivePoint(label, reading) {
     pDs.data.push({ x: ts, y: reading.signal_dbfs });
     if (vDs) {
       const vpkLive = reading.signal_dbfs != null
-        ? Math.min(1.0, Math.pow(10, (reading.signal_dbfs + state.calibrationOffsetDB) / 20))
+        ? Math.pow(10, (reading.signal_dbfs + state.calibrationOffsetDB) / 20)
         : null;
       vDs.data.push({ x: ts, y: vpkLive });
     }
