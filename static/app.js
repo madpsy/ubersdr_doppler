@@ -1436,6 +1436,7 @@ function initCharts() {
             filter: item => !item.text.endsWith(' min') && !item.text.endsWith(' max'),
           },
           // When a station's mean-line is toggled, also toggle its band datasets
+          // and sync the hidden state to the SNR, power, and Vpk charts.
           onClick(e, legendItem, legend) {
             const chart = legend.chart;
             const clickedLabel = legendItem.text;
@@ -1443,13 +1444,21 @@ function initCharts() {
             const clickedDs = chart.data.datasets[legendItem.datasetIndex];
             const nowHidden = !clickedDs.hidden;
             clickedDs.hidden = nowHidden;
-            // Also toggle the corresponding min/max band datasets
+            // Also toggle the corresponding min/max band datasets on the doppler chart
             chart.data.datasets.forEach(ds => {
               if (ds._isBand && (ds.label === clickedLabel + ' min' || ds.label === clickedLabel + ' max')) {
                 ds.hidden = nowHidden;
               }
             });
             chart.update('none');
+            // Sync visibility to SNR, power, and Vpk charts (datasets matched by label)
+            [state.snrChart, state.powerChart, state.vpkChart].forEach(c => {
+              if (!c) return;
+              c.data.datasets.forEach(ds => {
+                if (ds.label === clickedLabel) ds.hidden = nowHidden;
+              });
+              c.update('none');
+            });
           },
         },
         tooltip: {
