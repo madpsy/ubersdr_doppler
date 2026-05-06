@@ -445,6 +445,13 @@ function renderStatusTable() {
     return;
   }
 
+  // ── Remove any placeholder rows (e.g. "Loading stations…") ───────────────
+  // These have no data-label attribute and must be cleared before we start
+  // building real station rows, otherwise they linger behind the new rows.
+  for (const tr of Array.from(tbody.querySelectorAll('tr:not([data-label])'))) {
+    tbody.removeChild(tr);
+  }
+
   // ── Build a keyed map of existing rows so we can patch in-place ──────────
   // Rows are identified by data-label; any row whose label is no longer in
   // state.stations is removed, and new stations get a freshly created row.
