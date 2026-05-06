@@ -34,6 +34,7 @@ const state = {
   showSNR: true,
   showPower: true,
   showBand: true,    // show min/max jitter band on doppler history chart
+  showMissing: true, // show 'No signal' gap bands on doppler history chart
   showRef: false,    // show reference station on history charts (off by default)
   showMidpointSun: true, // show sunrise/sunset lines at path midpoint on history chart
   chartMode: 'doppler',  // 'doppler' | 'absolute'
@@ -2406,6 +2407,7 @@ function startHistoryRefreshTicker() {
 const gapAnnotationPlugin = {
   id: 'gapAnnotation',
   afterDraw(chart) {
+    if (!state.showMissing) return;
     // Only apply to the Doppler chart (it has a 'zeroLine' plugin registered)
     if (!chart.options.plugins || !chart.options.plugins.legend) return;
     const xScale = chart.scales.x;
@@ -2959,6 +2961,15 @@ document.addEventListener('DOMContentLoaded', async () => {
     showBandEl.addEventListener('change', e => {
       state.showBand = e.target.checked;
       applyBandVisibility();
+    });
+  }
+
+  // ── Missing (no-signal gap) toggle ───────────────────────────────────────
+  const showMissingEl = document.getElementById('show-missing');
+  if (showMissingEl) {
+    showMissingEl.addEventListener('change', e => {
+      state.showMissing = e.target.checked;
+      if (state.dopplerChart) state.dopplerChart.update('none');
     });
   }
 
