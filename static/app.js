@@ -683,6 +683,7 @@ function renderStatusTable() {
         const tmpDiv = document.createElement('div');
         tmpDiv.innerHTML = corrHtml;
         const srcTd = tmpDiv.firstElementChild;
+        console.debug('[corr-cell]', label, 'ci:', ci, 'cells.length:', cells.length, 'cells[ci]:', cells[ci]?.dataset?.col, 'srcTd:', srcTd?.outerHTML, 'current innerHTML:', cells[ci]?.innerHTML);
         if (srcTd) {
           if (cells[ci].className !== (srcTd.className || '')) cells[ci].className = srcTd.className || '';
           if (cells[ci].style.color !== (srcTd.style.color || '')) cells[ci].style.color = srcTd.style.color || '';
