@@ -514,6 +514,7 @@ function renderStatusTable() {
         const cHz = (valid && r.corrected_doppler_hz !== null && r.corrected_doppler_hz !== undefined)
           ? r.corrected_doppler_hz
           : (s.corrected_doppler_hz !== null && s.corrected_doppler_hz !== undefined ? s.corrected_doppler_hz : null);
+        console.debug('[corr]', label, 'valid:', valid, 'r.corrected_doppler_hz:', r.corrected_doppler_hz, 's.corrected_doppler_hz:', s.corrected_doppler_hz, '→ cHz:', cHz);
         corrHtml = cHz !== null
           ? `<td class="${dopplerClass(cHz)}">${fmtDoppler(cHz)}</td>`
           : '<td class="invalid">—</td>';
