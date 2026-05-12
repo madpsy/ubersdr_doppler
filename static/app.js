@@ -355,8 +355,11 @@ function fmtHz(hz) {
 
 function fmtDoppler(hz) {
   if (hz === null || hz === undefined) return '—';
+  const rounded = hz.toFixed(2);
+  // Avoid showing "-0.00" — if the rounded value is zero, always show "+0.00"
+  if (rounded === '0.00' || rounded === '-0.00') return '+0.00 Hz';
   const sign = hz >= 0 ? '+' : '';
-  return sign + hz.toFixed(2) + ' Hz';
+  return sign + rounded + ' Hz';
 }
 
 function dopplerClass(hz) {

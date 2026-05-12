@@ -149,9 +149,9 @@ td { font-variant-numeric: tabular-nums; }
 
 .station-dot { display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin-right: 6px; vertical-align: middle; }
 
-.doppler-pos  { color: var(--green); font-weight: 600; }
+.doppler-pos  { color: var(--red);   font-weight: 600; }
 .doppler-neg  { color: var(--red);   font-weight: 600; }
-.doppler-zero { color: var(--muted); }
+.doppler-zero { color: var(--green); font-weight: 600; }
 .invalid      { color: var(--muted); font-style: italic; }
 
 .state-excellent { color: #58ffb0; font-weight: 600; }          /* bright cyan-green  ≥50 dB */
