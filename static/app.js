@@ -505,19 +505,19 @@ function renderStatusTable() {
       tsHtml = fmtUTC(r.timestamp) + staleBadge;
     }
 
-    // Corrected Doppler cell HTML
-    let corrHtml = null; // null = column not shown
+    // Corrected Doppler cell — store as {cls, text, style} rather than an HTML string.
+    // (<td> elements are stripped when set as innerHTML of a <div>, so we patch the cell directly.)
+    let corrCell = null; // null = column not shown
     if (showRef) {
       if (isRef) {
-        corrHtml = '<td style="color:var(--muted)">— (ref)</td>';
+        corrCell = { cls: '', style: 'color:var(--muted)', text: '— (ref)' };
       } else {
         const cHz = (valid && r.corrected_doppler_hz !== null && r.corrected_doppler_hz !== undefined)
           ? r.corrected_doppler_hz
           : (s.corrected_doppler_hz !== null && s.corrected_doppler_hz !== undefined ? s.corrected_doppler_hz : null);
-        console.debug('[corr]', label, 'valid:', valid, 'r.corrected_doppler_hz:', r.corrected_doppler_hz, 's.corrected_doppler_hz:', s.corrected_doppler_hz, '→ cHz:', cHz);
-        corrHtml = cHz !== null
-          ? `<td class="${dopplerClass(cHz)}">${fmtDoppler(cHz)}</td>`
-          : '<td class="invalid">—</td>';
+        corrCell = cHz !== null
+          ? { cls: dopplerClass(cHz), style: '', text: fmtDoppler(cHz) }
+          : { cls: 'invalid', style: '', text: '—' };
       }
     }
 
@@ -670,25 +670,22 @@ function renderStatusTable() {
 
     // [3?] Corrected doppler — only when showRef
     if (showRef) {
-      // If the column was just added (new row), it already exists; if showRef
-      // just became true for an existing row we need to insert the cell.
+      // Ensure the corr cell exists (may be missing if row was created before showRef became true)
       if (!cells[ci] || cells[ci].dataset.col !== 'corr') {
         const tdCorr = document.createElement('td');
         tdCorr.dataset.col = 'corr';
         tr.insertBefore(tdCorr, cells[ci] || null);
       }
-      // corrHtml is a full <td>…</td> string — extract just the inner HTML
-      if (corrHtml !== null) {
-        // Parse class and content from corrHtml
-        const tmpDiv = document.createElement('div');
-        tmpDiv.innerHTML = corrHtml;
-        const srcTd = tmpDiv.firstElementChild;
-        console.debug('[corr-cell]', label, 'ci:', ci, 'cells.length:', cells.length, 'cells[ci]:', cells[ci]?.dataset?.col, 'srcTd:', srcTd?.outerHTML, 'current innerHTML:', cells[ci]?.innerHTML);
-        if (srcTd) {
-          if (cells[ci].className !== (srcTd.className || '')) cells[ci].className = srcTd.className || '';
-          if (cells[ci].style.color !== (srcTd.style.color || '')) cells[ci].style.color = srcTd.style.color || '';
-          if (cells[ci].innerHTML !== srcTd.innerHTML) cells[ci].innerHTML = srcTd.innerHTML;
+      // Patch cell directly — never use innerHTML of a <div> to parse a <td>,
+      // as browsers strip <td> elements that aren't inside a <table>.
+      if (corrCell !== null) {
+        const td = cells[ci];
+        if (td.className !== corrCell.cls) td.className = corrCell.cls;
+        if (td.getAttribute('style') !== (corrCell.style || null)) {
+          if (corrCell.style) td.setAttribute('style', corrCell.style);
+          else td.removeAttribute('style');
         }
+        if (td.textContent !== corrCell.text) td.textContent = corrCell.text;
       }
       ci++;
     } else {
