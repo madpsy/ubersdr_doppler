@@ -1235,12 +1235,15 @@ func detectDopplerWithPeak(bins []float32, binBandwidth, minSNR, maxDriftHz, max
 	// accuracy when the signal spans several bins.
 	var centroidBin float64
 
-	// Step 1: parabolic interpolation (always applied)
+	// Step 1: parabolic interpolation (always applied).
+	// Operate on linear power (not dBFS) so the parabola is symmetric around
+	// the true peak — interpolating log-domain values introduces a small but
+	// consistent sub-bin bias because log compresses the tails asymmetrically.
 	parabolicBin := float64(peakBin)
 	if peakBin > 0 && peakBin < n-1 {
-		alpha := float64(bins[peakBin-1])
-		beta := float64(bins[peakBin])
-		gamma := float64(bins[peakBin+1])
+		alpha := math.Pow(10.0, float64(bins[peakBin-1])/10.0)
+		beta := math.Pow(10.0, float64(bins[peakBin])/10.0)
+		gamma := math.Pow(10.0, float64(bins[peakBin+1])/10.0)
 		denom := alpha - 2*beta + gamma
 		if math.Abs(denom) > 0.001 {
 			p := 0.5 * (alpha - gamma) / denom
