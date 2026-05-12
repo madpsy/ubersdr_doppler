@@ -348,21 +348,21 @@ function escapeHtml(str) {
 }
 
 function fmtHz(hz) {
-  if (Math.abs(hz) >= 1e6) return (hz / 1e6).toFixed(3) + ' MHz';
-  if (Math.abs(hz) >= 1e3) return (hz / 1e3).toFixed(3) + ' kHz';
+  if (Math.abs(hz) >= 1e6) return (hz / 1e6).toFixed(2) + ' MHz';
+  if (Math.abs(hz) >= 1e3) return (hz / 1e3).toFixed(2) + ' kHz';
   return hz + ' Hz';
 }
 
 function fmtDoppler(hz) {
   if (hz === null || hz === undefined) return '—';
   const sign = hz >= 0 ? '+' : '';
-  return sign + hz.toFixed(3) + ' Hz';
+  return sign + hz.toFixed(2) + ' Hz';
 }
 
 function dopplerClass(hz) {
-  // Use 0.0005 as the zero threshold so the class matches what toFixed(3) displays:
-  // any value that would show as "0.000" gets doppler-zero; everything else is coloured.
-  if (Math.abs(hz) < 0.0005) return 'doppler-zero';
+  // Use 0.005 as the zero threshold so the class matches what toFixed(2) displays:
+  // any value that would show as "0.00" gets doppler-zero; everything else is coloured.
+  if (Math.abs(hz) < 0.005) return 'doppler-zero';
   return hz > 0 ? 'doppler-pos' : 'doppler-neg';
 }
 
@@ -1053,7 +1053,7 @@ function drawMiniSpectrum(canvasId, s, stationIdx) {
     const corrLabel = (s.current.corrected_doppler_hz !== null && s.current.corrected_doppler_hz !== undefined)
       ? ' (corr)' : '';
     if (infoEl) {
-      infoEl.textContent = `${sign}${dHz.toFixed(3)} Hz${corrLabel}  SNR: ${s.current.snr_db.toFixed(1)} dB`;
+      infoEl.textContent = `${sign}${dHz.toFixed(2)} Hz${corrLabel}  SNR: ${s.current.snr_db.toFixed(1)} dB`;
       infoEl.style.color = Math.abs(dHz) < 0.5 ? 'var(--green)' : 'var(--accent)';
     }
   } else if (peakBin >= 0 && peakBin < n) {
@@ -1475,11 +1475,11 @@ function initCharts() {
               if (ctx.dataset._isBand) return null;
               const pt = ctx.raw;
               const val = state.chartMode === 'absolute'
-                ? `${ctx.parsed.y.toFixed(3)} Hz`
+                ? `${ctx.parsed.y.toFixed(2)} Hz`
                 : fmtDoppler(ctx.parsed.y);
               const lines = [`${ctx.dataset.label}: ${val}`];
               if (pt && pt.std !== undefined && pt.std !== null) {
-                lines.push(`  σ (jitter): ±${pt.std.toFixed(3)} Hz`);
+                lines.push(`  σ (jitter): ±${pt.std.toFixed(2)} Hz`);
               }
               if (pt && pt.min !== undefined && pt.max !== undefined && pt.min !== null) {
                 lines.push(`  min: ${fmtDoppler(pt.min)}  max: ${fmtDoppler(pt.max)}`);

@@ -216,7 +216,7 @@ window.DopplerMap = (() => {
         <div class="map-popup">
           <div class="map-popup-title" style="color:${colour}">${label} — propagation path</div>
           <div class="map-popup-row"><span class="map-popup-label">Distance</span><span>${distKm.toFixed(0)} km</span></div>
-          <div class="map-popup-row"><span class="map-popup-label">Frequency</span><span>${(freqHz/1e6).toFixed(3)} MHz</span></div>
+          <div class="map-popup-row"><span class="map-popup-label">Frequency</span><span>${(freqHz/1e6).toFixed(2)} MHz</span></div>
           <div class="map-popup-row"><span class="map-popup-label">Est. hops</span><span>${nHops}</span></div>
         </div>
       `, { maxWidth: 220 }).addTo(map);
@@ -228,7 +228,7 @@ window.DopplerMap = (() => {
       }).bindPopup(`
         <div class="map-popup">
           <div class="map-popup-title" style="color:${colour}">📻 ${label}</div>
-          <div class="map-popup-row"><span class="map-popup-label">Frequency</span><span>${(freqHz/1e6).toFixed(3)} MHz</span></div>
+          <div class="map-popup-row"><span class="map-popup-label">Frequency</span><span>${(freqHz/1e6).toFixed(2)} MHz</span></div>
           <div class="map-popup-row"><span class="map-popup-label">Grid</span><span>${s.config.grid}</span></div>
           <div class="map-popup-row"><span class="map-popup-label">Lat/Lon</span><span>${txPos.lat.toFixed(3)}°, ${txPos.lon.toFixed(3)}°</span></div>
           <div class="map-popup-row"><span class="map-popup-label">Distance</span><span>${distKm.toFixed(0)} km</span></div>
@@ -401,9 +401,9 @@ window.DopplerMap = (() => {
         const dHz = (cur.corrected_doppler_hz !== null && cur.corrected_doppler_hz !== undefined)
           ? cur.corrected_doppler_hz : cur.doppler_hz;
         const absHz = nomHz + dHz;
-        freqStr = absHz.toFixed(3) + ' Hz';
+        freqStr = absHz.toFixed(2) + ' Hz';
         const sign = dHz >= 0 ? '+' : '';
-        doppStr = `<span class="map-freq-doppler">${sign}${dHz.toFixed(3)} Hz</span>`;
+        doppStr = `<span class="map-freq-doppler">${sign}${dHz.toFixed(2)} Hz</span>`;
       }
       rows.push(`<div class="map-freq-row">
         <span class="map-freq-dot" style="background:${colour}"></span>

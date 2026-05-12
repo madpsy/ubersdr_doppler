@@ -704,8 +704,8 @@ const AudioAnalysisModal = (() => {
   }
 
   function fmtHzLocal(hz) {
-    if (Math.abs(hz) >= 1e6) return (hz / 1e6).toFixed(3) + ' MHz';
-    if (Math.abs(hz) >= 1e3) return (hz / 1e3).toFixed(3) + ' kHz';
+    if (Math.abs(hz) >= 1e6) return (hz / 1e6).toFixed(2) + ' MHz';
+    if (Math.abs(hz) >= 1e3) return (hz / 1e3).toFixed(2) + ' kHz';
     return hz.toFixed(0) + ' Hz';
   }
 
