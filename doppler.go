@@ -1245,7 +1245,10 @@ func detectDopplerWithPeak(bins []float32, binBandwidth, minSNR, maxDriftHz, max
 		beta := math.Pow(10.0, float64(bins[peakBin])/10.0)
 		gamma := math.Pow(10.0, float64(bins[peakBin+1])/10.0)
 		denom := alpha - 2*beta + gamma
-		if math.Abs(denom) > 0.001 {
+		// Use a relative threshold: denom must be at least 1e-6 × beta so the
+		// check works correctly in linear-power domain (values are far smaller
+		// than the old dB-domain threshold of 0.001).
+		if beta > 0 && math.Abs(denom) > 1e-6*beta {
 			p := 0.5 * (alpha - gamma) / denom
 			if p > 0.5 {
 				p = 0.5
