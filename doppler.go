@@ -51,6 +51,27 @@ type DopplerReading struct {
 	SignalDBFS         float32   `json:"signal_dbfs"`                    // peak signal power (dBFS)
 	NoiseDBFS          float32   `json:"noise_dbfs"`                     // noise floor (dBFS)
 	Valid              bool      `json:"valid"`                          // false if SNR < minSNR or no signal
+
+	// IQ-derived propagation metrics — nil until the rolling window has ≥10 valid samples.
+	// These fields are SSE/API-only and do not appear in the Grape CSV output.
+	//
+	// DopplerSpreadHz: standard deviation of DopplerHz over the last ≤60 valid samples.
+	//   Elevated values indicate ionospheric spread-F, multipath, or rapid fading.
+	//   Typical quiet-ionosphere value: <0.05 Hz.
+	//
+	// ScintillationS4: normalised amplitude variability = stddev(A)/mean(A) where
+	//   A = 10^(SignalDBFS/20) (linear amplitude).  Values >0.3 indicate moderate
+	//   scintillation.  Computed from the same rolling window as DopplerSpreadHz.
+	//   Note: derived from FFT peak-bin power at ~0.5 Hz sample rate; suitable for
+	//   detecting gross scintillation events but not rigorous S4 research.
+	//
+	// MultipathIndex: ratio of sideband energy to carrier energy in the FFT window.
+	//   = sum(linear power in ±10 Hz sideband, excluding ±4 Hz guard) / carrier power.
+	//   Higher values indicate stronger multipath or adjacent interference.
+	//   Typical clean-path value: <0.01.
+	DopplerSpreadHz *float64 `json:"doppler_spread_hz,omitempty"`
+	ScintillationS4 *float64 `json:"scintillation_s4,omitempty"`
+	MultipathIndex  *float64 `json:"multipath_index,omitempty"`
 }
 
 // MinuteMean is the 1-minute mean of valid DopplerReadings.
@@ -345,6 +366,15 @@ type DopplerStation struct {
 	latestBins  []float32 // latest unwrapped spectrum bins for display
 	latestPeak  int       // peak bin index in latestBins (-1 if no valid signal)
 	latestBinBW float64   // actual bin bandwidth (Hz) reported by server
+
+	// Rolling window ring buffer for propagation metrics.
+	// Updated only on valid readings; protected by rollingMu.
+	// Fixed-size arrays avoid per-tick allocations on the hot path.
+	rollingMu      sync.Mutex
+	rollingDoppler [60]float64 // ring buffer: DopplerHz per valid sample
+	rollingAmp     [60]float64 // ring buffer: linear amplitude = 10^(SignalDBFS/20)
+	rollingIdx     int         // next write position (0–59)
+	rollingFilled  int         // number of slots populated (0–60)
 
 	// Signal-recovery debounce: once a station drops to no-signal it must
 	// sustain a continuously valid signal for signalRecoveryDuration before
@@ -856,7 +886,7 @@ func (ds *DopplerStation) runSpectrumLoop(ctx context.Context) {
 				continue
 			}
 
-			reading, peakBin := detectDopplerWithPeak(bins, binBW, ds.minSNR, ds.maxDriftHz, ds.maxSignalBWHz, ds.localSNRWindowHz)
+			reading, peakBin, multipathIdx := detectDopplerWithPeak(bins, binBW, ds.minSNR, ds.maxDriftHz, ds.maxSignalBWHz, ds.localSNRWindowHz)
 			reading.Timestamp = time.Now().UTC()
 
 			// ── Signal-recovery debounce ──────────────────────────────────────
@@ -908,6 +938,54 @@ func (ds *DopplerStation) runSpectrumLoop(ctx context.Context) {
 			ds.latestPeak = peakBin
 			ds.latestBinBW = binBW
 			ds.mu.Unlock()
+
+			// ── Propagation metrics ───────────────────────────────────────────
+			// Update rolling window and attach metrics to the reading.
+			// Only valid readings contribute to the window; invalid readings
+			// leave the window unchanged and get nil metric fields.
+			if reading.Valid {
+				// Multipath index — computed per-frame from the current bins.
+				if multipathIdx > 0 {
+					reading.MultipathIndex = &multipathIdx
+				}
+
+				// Rolling window update for spread and S4.
+				ds.rollingMu.Lock()
+				idx := ds.rollingIdx
+				ds.rollingDoppler[idx] = reading.DopplerHz
+				ds.rollingAmp[idx] = math.Pow(10.0, float64(reading.SignalDBFS)/20.0)
+				ds.rollingIdx = (idx + 1) % 60
+				if ds.rollingFilled < 60 {
+					ds.rollingFilled++
+				}
+				filled := ds.rollingFilled
+				// Extract a contiguous slice from the ring buffer for computation.
+				// Copy into a local slice so we can release the lock immediately.
+				dopplerSnap := make([]float64, filled)
+				ampSnap := make([]float64, filled)
+				// The ring buffer is written in order; the oldest entry is at
+				// rollingIdx (wraps around). For simplicity, copy all filled
+				// slots in insertion order.
+				start := (ds.rollingIdx - filled + 60) % 60
+				for j := 0; j < filled; j++ {
+					dopplerSnap[j] = ds.rollingDoppler[(start+j)%60]
+					ampSnap[j] = ds.rollingAmp[(start+j)%60]
+				}
+				ds.rollingMu.Unlock()
+
+				// Require at least 10 valid samples before reporting metrics
+				// to avoid noisy values during startup or after signal recovery.
+				if filled >= 10 {
+					spread := stddevFloat64(dopplerSnap)
+					reading.DopplerSpreadHz = &spread
+
+					meanAmp := meanFloat64(ampSnap)
+					if meanAmp > 0 {
+						s4 := stddevFloat64(ampSnap) / meanAmp
+						reading.ScintillationS4 = &s4
+					}
+				}
+			}
 
 			// Attach reference correction. Must be done before accumulating the
 			// sample so that aggregateMinute() sees per-sample corrected values
@@ -1290,16 +1368,22 @@ var wsDialer = &websocket.Dialer{
 // maxSignalBWHz: max 3 dB bandwidth of a valid carrier (0 → default 4 Hz).
 // localSNRWindowHz: half-width of local-SNR neighbourhood (0 → default 10 Hz).
 func detectDoppler(bins []float32, binBandwidth, minSNR, maxDriftHz, maxSignalBWHz, localSNRWindowHz float64) DopplerReading {
-	r, _ := detectDopplerWithPeak(bins, binBandwidth, minSNR, maxDriftHz, maxSignalBWHz, localSNRWindowHz)
+	r, _, _ := detectDopplerWithPeak(bins, binBandwidth, minSNR, maxDriftHz, maxSignalBWHz, localSNRWindowHz)
 	return r
 }
 
-// detectDopplerWithPeak is like detectDoppler but also returns the integer peak bin index.
-// Returns -1 for peakBin when no valid signal is found.
-func detectDopplerWithPeak(bins []float32, binBandwidth, minSNR, maxDriftHz, maxSignalBWHz, localSNRWindowHz float64) (DopplerReading, int) {
+// detectDopplerWithPeak is like detectDoppler but also returns the integer peak
+// bin index and the multipath index.
+//
+// multipathIndex = sum(linear power in sideband bins) / carrier linear power,
+// where sideband bins are within ±sidebandHalfBins of the peak but outside the
+// ±guardBins exclusion zone around the carrier.  Returns 0 when no valid signal.
+//
+// Returns -1 for peakBin and 0 for multipathIndex when no valid signal is found.
+func detectDopplerWithPeak(bins []float32, binBandwidth, minSNR, maxDriftHz, maxSignalBWHz, localSNRWindowHz float64) (DopplerReading, int, float64) {
 	n := len(bins)
 	if n == 0 {
-		return DopplerReading{}, -1
+		return DopplerReading{}, -1, 0
 	}
 
 	// Noise floor: P5 percentile of the full spectrum (same as UberSDR).
@@ -1330,7 +1414,7 @@ func detectDopplerWithPeak(bins []float32, binBandwidth, minSNR, maxDriftHz, max
 
 	snr := peakPower - noiseFloor
 	if float64(snr) < minSNR {
-		return DopplerReading{SNR: snr, SignalDBFS: peakPower, NoiseDBFS: noiseFloor, Valid: false}, -1
+		return DopplerReading{SNR: snr, SignalDBFS: peakPower, NoiseDBFS: noiseFloor, Valid: false}, -1, 0
 	}
 
 	// Prefer peak near centre if within 30 dB of global max (same as UberSDR)
@@ -1387,7 +1471,7 @@ func detectDopplerWithPeak(bins []float32, binBandwidth, minSNR, maxDriftHz, max
 			localFloor := percentileFloat32(localBins, 50) // median of neighbourhood
 			localSNR := peakPower - localFloor
 			if float64(localSNR) < minSNR {
-				return DopplerReading{SNR: snr, SignalDBFS: peakPower, NoiseDBFS: noiseFloor, Valid: false}, -1
+				return DopplerReading{SNR: snr, SignalDBFS: peakPower, NoiseDBFS: noiseFloor, Valid: false}, -1, 0
 			}
 		}
 	}
@@ -1445,7 +1529,7 @@ func detectDopplerWithPeak(bins []float32, binBandwidth, minSNR, maxDriftHz, max
 	}
 	bwHz := float64(endBin-startBin+1) * binBandwidth
 	if bwHz > bwLimit {
-		return DopplerReading{SNR: snr, SignalDBFS: peakPower, NoiseDBFS: noiseFloor, Valid: false}, -1
+		return DopplerReading{SNR: snr, SignalDBFS: peakPower, NoiseDBFS: noiseFloor, Valid: false}, -1, 0
 	}
 
 	var weightedSum, totalWeight float64
@@ -1467,13 +1551,75 @@ func detectDopplerWithPeak(bins []float32, binBandwidth, minSNR, maxDriftHz, max
 	// Offset from centre bin → Doppler Hz
 	dopplerHz := (centroidBin - float64(n)/2.0) * binBandwidth
 
+	// ── Multipath index ───────────────────────────────────────────────────────
+	// Ratio of sideband energy to carrier energy.
+	// Sideband window: ±sidebandHalfBins around the peak, excluding the
+	// ±guardBins zone that contains the carrier and its FFT leakage skirts.
+	// Both the sideband and carrier are converted to linear power (not dBFS)
+	// so the ratio is physically meaningful.
+	const (
+		sidebandHalfBins = 20 // ±10 Hz at 0.5 Hz/bin
+		multipathGuard   = 8  // same as localSNRGuardBins — ±4 Hz guard
+	)
+	carrierLinear := math.Pow(10.0, float64(peakPower)/10.0)
+	var sidebandSum float64
+	sbLo := peakBin - sidebandHalfBins
+	sbHi := peakBin + sidebandHalfBins
+	gLo := peakBin - multipathGuard
+	gHi := peakBin + multipathGuard
+	for i := sbLo; i <= sbHi; i++ {
+		if i < 0 || i >= n {
+			continue
+		}
+		if i >= gLo && i <= gHi {
+			continue // skip guard band (carrier + leakage)
+		}
+		sidebandSum += math.Pow(10.0, float64(bins[i])/10.0)
+	}
+	var multipathIndex float64
+	if carrierLinear > 0 {
+		multipathIndex = sidebandSum / carrierLinear
+	}
+
 	return DopplerReading{
 		DopplerHz:  dopplerHz,
 		SNR:        snr,
 		SignalDBFS: peakPower,
 		NoiseDBFS:  noiseFloor,
 		Valid:      true,
-	}, peakBin
+	}, peakBin, multipathIndex
+}
+
+// ---------------------------------------------------------------------------
+// Rolling-window statistics helpers
+// ---------------------------------------------------------------------------
+
+// meanFloat64 returns the arithmetic mean of v. Returns 0 for an empty slice.
+func meanFloat64(v []float64) float64 {
+	if len(v) == 0 {
+		return 0
+	}
+	var sum float64
+	for _, x := range v {
+		sum += x
+	}
+	return sum / float64(len(v))
+}
+
+// stddevFloat64 returns the sample standard deviation of v (n-1 denominator).
+// Returns 0 for slices with fewer than 2 elements.
+func stddevFloat64(v []float64) float64 {
+	n := len(v)
+	if n < 2 {
+		return 0
+	}
+	mean := meanFloat64(v)
+	var sumSq float64
+	for _, x := range v {
+		d := x - mean
+		sumSq += d * d
+	}
+	return math.Sqrt(sumSq / float64(n-1))
 }
 
 // LatestSpectrum returns the latest unwrapped spectrum bins, peak bin index,

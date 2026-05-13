@@ -839,3 +839,41 @@ tr.row-stale td  { background: rgba(210,153,34,0.08); }
 }
 .ftp-log-summary.ftp-log-ok  { background: rgba(63,185,80,0.12);  color: var(--green); }
 .ftp-log-summary.ftp-log-err { background: rgba(248,81,73,0.12);  color: var(--red);   }
+
+/* ---------------------------------------------------------------------------
+ * Propagation metrics sub-row
+ * Appears immediately below each station's main status row when
+ * doppler_spread_hz, scintillation_s4, or multipath_index are available.
+ * --------------------------------------------------------------------------- */
+.prop-metrics-row {
+  background: transparent;
+}
+.prop-metrics-cell {
+  padding: 2px 8px 6px 8px !important;
+  border-top: none !important;
+  font-size: 0.75rem;
+  color: var(--muted);
+  white-space: nowrap;
+  overflow: hidden;
+}
+/* Each metric chip: label + value side by side */
+.prop-metric {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 4px;
+  margin-right: 18px;
+  cursor: default;
+}
+.prop-label {
+  font-size: 0.70rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: #6e7681;
+  border-bottom: 1px dotted #6e7681;
+}
+.prop-value {
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+  font-size: 0.78rem;
+  color: var(--text);
+}

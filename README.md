@@ -187,6 +187,41 @@ GET /api/csv?station=WWV-10&date=2026-05-01
 | `POST` | `/api/stations/update` | Update a station (JSON body, `id` required) |
 | `POST` | `/api/stations/remove` | Remove a station (`{"label":"..."}`) |
 
+### SSE live feed — `/api/events`
+
+Each `data:` event is a JSON object:
+
+```json
+{
+  "station": "WWV-10",
+  "reading": {
+    "timestamp":           "2026-05-13T09:00:00Z",
+    "doppler_hz":          0.23,
+    "corrected_doppler_hz": 0.18,
+    "snr_db":              28.4,
+    "signal_dbfs":         -42.1,
+    "noise_dbfs":          -70.5,
+    "valid":               true,
+    "doppler_spread_hz":   0.041,
+    "scintillation_s4":    0.018,
+    "multipath_index":     0.003
+  },
+  "server_time": "2026-05-13T09:00:00.123Z"
+}
+```
+
+The three propagation metric fields are **omitted** (not `null`) until the rolling window has accumulated at least 10 valid samples (~10–20 seconds after signal acquisition). They are also omitted when `valid` is `false`.
+
+#### Propagation metric fields
+
+| Field | Type | Description |
+|---|---|---|
+| `doppler_spread_hz` | `float64` | Standard deviation of `doppler_hz` over the last ≤60 valid samples. Elevated values (>0.1 Hz) indicate ionospheric spread-F, multipath, or rapid fading. Typical quiet-ionosphere value: <0.05 Hz. |
+| `scintillation_s4` | `float64` | Amplitude scintillation index S4 = `stddev(A)/mean(A)` where `A = 10^(signal_dbfs/20)` (linear amplitude), computed over the same rolling window. Values >0.3 indicate moderate scintillation. Note: derived from FFT peak-bin power at ~0.5 Hz sample rate; suitable for detecting gross scintillation events. |
+| `multipath_index` | `float64` | Ratio of sideband energy to carrier energy in the FFT window: `sum(sideband linear power) / carrier linear power`. Sideband is ±10 Hz around the carrier, excluding a ±4 Hz guard band. Higher values indicate stronger multipath or adjacent interference. Typical clean-path value: <0.01. |
+
+> **Note on `phase_stability_deg`:** This metric (short-term variation of the unwrapped carrier phase) was evaluated but is **not implemented**. The SPEC binary protocol used for spectrum measurement delivers pre-computed power spectral density (real-valued dBFS magnitudes); phase information is discarded by radiod before transmission. Implementing phase stability would require an always-on IQ stream connection and a phase-locked loop — a substantial architectural change outside the scope of the spectrum-based measurement pipeline.
+
 ---
 
 ## Environment Variables

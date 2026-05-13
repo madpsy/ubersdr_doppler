@@ -415,6 +415,13 @@ function fmtAgo(t) {
   return `${mins}m ago`;
 }
 
+// Format a propagation metric value for display.
+// Returns '—' when the value is null/undefined/NaN.
+function fmtPropMetric(val, decimals) {
+  if (val === null || val === undefined || isNaN(val)) return '—';
+  return val.toFixed(decimals);
+}
+
 function renderStatusTable() {
   const tbody = document.getElementById('status-tbody');
   const thead = document.querySelector('#status-table thead tr');
@@ -569,6 +576,12 @@ function renderStatusTable() {
       dotTitle = `Poor signal — SNR ${r.snr_db.toFixed(1)} dB`;
     }
 
+    // Propagation metrics row — shown only when at least one metric is available.
+    const spread  = valid ? (r.doppler_spread_hz  ?? null) : null;
+    const s4      = valid ? (r.scintillation_s4   ?? null) : null;
+    const mpath   = valid ? (r.multipath_index    ?? null) : null;
+    const hasProp = spread !== null || s4 !== null || mpath !== null;
+
     // Row-level CSS class
     let rowClass = '';
     if (stale)       rowClass = 'row-stale';
@@ -583,6 +596,7 @@ function renderStatusTable() {
     if (!tr) {
       tr = document.createElement('tr');
       tr.dataset.label = label;
+      tr.dataset.mainRow = '1';
 
       // Station name cell (static — colour dot, label, ref badge, backend dot)
       const tdStation = document.createElement('td');
@@ -643,6 +657,47 @@ function renderStatusTable() {
 
       tbody.appendChild(tr);
       existingRows[label] = tr;
+    }
+
+    // ── Propagation metrics sub-row ───────────────────────────────────────────
+    // A second <tr> immediately after the main row, spanning all columns,
+    // showing doppler_spread_hz, scintillation_s4, and multipath_index.
+    // Created on first appearance; hidden when no metrics are available yet.
+    const propRowId = `prop-row-${label.replace(/[^a-zA-Z0-9]/g, '_')}`;
+    let propTr = document.getElementById(propRowId);
+    if (!propTr) {
+      propTr = document.createElement('tr');
+      propTr.id = propRowId;
+      propTr.dataset.label = label;
+      propTr.dataset.propRow = '1';
+      propTr.className = 'prop-metrics-row';
+      const td = document.createElement('td');
+      td.colSpan = 99; // spans all columns regardless of showRef
+      td.className = 'prop-metrics-cell';
+      propTr.appendChild(td);
+      // Insert immediately after the main row
+      if (tr.nextSibling) {
+        tbody.insertBefore(propTr, tr.nextSibling);
+      } else {
+        tbody.appendChild(propTr);
+      }
+    }
+    // Update prop row content and visibility
+    const propTd = propTr.firstElementChild;
+    if (hasProp) {
+      const spreadStr  = spread !== null
+        ? `<span class="prop-metric"><span class="prop-label" title="Standard deviation of Doppler shift over last ≤60 valid samples. Elevated values indicate spread-F, multipath, or rapid fading.">Δf spread</span> <span class="prop-value">${fmtPropMetric(spread, 3)} Hz</span></span>`
+        : '';
+      const s4Str      = s4 !== null
+        ? `<span class="prop-metric"><span class="prop-label" title="S4 amplitude scintillation index = stddev(amplitude)/mean(amplitude). Values >0.3 indicate moderate scintillation.">S4</span> <span class="prop-value">${fmtPropMetric(s4, 3)}</span></span>`
+        : '';
+      const mpathStr   = mpath !== null
+        ? `<span class="prop-metric"><span class="prop-label" title="Multipath index = sideband energy / carrier energy in the FFT window. Higher values indicate stronger multipath or adjacent interference.">Multipath</span> <span class="prop-value">${fmtPropMetric(mpath, 4)}</span></span>`
+        : '';
+      propTd.innerHTML = spreadStr + s4Str + mpathStr;
+      propTr.style.display = '';
+    } else {
+      propTr.style.display = 'none';
     }
 
     // ── Patch row class ───────────────────────────────────────────────────────
@@ -729,11 +784,21 @@ function renderStatusTable() {
   for (const [lbl, tr] of Object.entries(existingRows)) {
     if (!wantedLabels.includes(lbl)) tbody.removeChild(tr);
   }
+  // Also remove orphaned prop-metric rows for removed stations
+  for (const tr of Array.from(tbody.querySelectorAll('tr[data-prop-row]'))) {
+    if (!wantedLabels.includes(tr.dataset.label)) tbody.removeChild(tr);
+  }
 
   // ── Reorder rows to match state.stations order ────────────────────────────
+  // Each station occupies two consecutive rows: main row then prop-metrics row.
   wantedLabels.forEach(lbl => {
     const tr = existingRows[lbl];
-    if (tr && tbody.lastElementChild !== tr) tbody.appendChild(tr);
+    if (!tr) return;
+    if (tbody.lastElementChild !== tr) tbody.appendChild(tr);
+    // Move prop row immediately after main row
+    const propRowId = `prop-row-${lbl.replace(/[^a-zA-Z0-9]/g, '_')}`;
+    const propTr = document.getElementById(propRowId);
+    if (propTr && tbody.lastElementChild !== propTr) tbody.appendChild(propTr);
   });
 }
 
