@@ -188,6 +188,17 @@ const AudioAnalysisModal = (() => {
       _audioCtx = new (window.AudioContext || window.webkitAudioContext)();
     }
 
+    // Update subtitle with actual AudioContext output rate (may differ from requested
+    // if the browser snapped to a supported value, e.g. 44100 instead of 12000).
+    {
+      const actualRate = _audioCtx.sampleRate;
+      const rateNote   = actualRate !== _sampleRate
+        ? ` · API out: ${actualRate} Hz`
+        : '';
+      document.getElementById('audio-modal-subtitle').textContent =
+        `${fmtHzLocal(_carrierFreqHz)} carrier · stream: ${_sampleRate} Hz · dial ${fmtHzLocal(_dialFreqHz)} (USB)${rateNote}`;
+    }
+
     _analyser                       = _audioCtx.createAnalyser();
     _analyser.fftSize               = FFT_SIZE;
     _analyser.smoothingTimeConstant = 0;
@@ -252,6 +263,16 @@ const AudioAnalysisModal = (() => {
       _audioCtx = new (window.AudioContext || window.webkitAudioContext)();
     }
 
+    // Update subtitle with actual AudioContext output rate.
+    {
+      const actualRate = _audioCtx.sampleRate;
+      const rateNote   = actualRate !== _sampleRate
+        ? ` · API out: ${actualRate} Hz`
+        : '';
+      document.getElementById('audio-modal-subtitle').textContent =
+        `${fmtHzLocal(_carrierFreqHz)} centre · stream: ${_sampleRate} Hz · ±${IQ_BW_HZ / 1000} kHz IQ${rateNote}`;
+    }
+
     // Stereo splitter: channel 0 = I (left), channel 1 = Q (right)
     _splitter = _audioCtx.createChannelSplitter(2);
 
@@ -267,17 +288,25 @@ const AudioAnalysisModal = (() => {
     _analyserQ.minDecibels           = -140;
     _analyserQ.maxDecibels           = 0;
 
-    // Route: source → splitter → analyserI / analyserQ → destination (silent — IQ is not audio)
+    // Route: source → splitter → analyserI / analyserQ → silentGain → destination
+    // The silent gain (volume=0) keeps the Web Audio graph active so the browser
+    // actually decodes the stream and feeds data to the AnalyserNodes.
+    // We must NOT set muted=true on the <audio> element — muted elements are not
+    // decoded by the Web Audio API in most browsers, which prevents FFT data.
     _splitter.connect(_analyserI, 0);
     _splitter.connect(_analyserQ, 1);
-    // Do NOT connect analyserI/Q to destination — IQ is not meant to be heard
+    const silentGain = _audioCtx.createGain();
+    silentGain.gain.value = 0;
+    _analyserI.connect(silentGain);
+    _analyserQ.connect(silentGain);
+    silentGain.connect(_audioCtx.destination);
 
     const BASE   = (window.BASE_PATH || '').replace(/\/$/, '');
     const iqUrl  = `${BASE}/api/iq/stream?station=${encodeURIComponent(_label)}`;
     _audioEl     = new Audio(iqUrl);
     _audioEl.crossOrigin = 'anonymous';
     _audioEl.preload     = 'none';
-    _audioEl.muted       = true; // IQ is not audio — mute playback
+    // Do NOT set muted=true — muted elements bypass Web Audio decoding in most browsers
 
     _sourceNode = _audioCtx.createMediaElementSource(_audioEl);
     _sourceNode.connect(_splitter);
