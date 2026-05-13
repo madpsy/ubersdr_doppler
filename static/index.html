@@ -100,12 +100,20 @@
           <canvas id="audio-fft-canvas" class="audio-canvas audio-canvas-fill" height="200"></canvas>
         </div>
 
-        <!-- IQ complex spectrum — IQ mode, hidden until IQ mode active -->
+        <!-- IQ spectrum — IQ mode, hidden until IQ mode active -->
         <div class="audio-panel audio-panel-fft" id="iq-fft-panel" style="display:none">
           <div class="audio-panel-label">IQ Complex Spectrum
             <span class="audio-panel-hint">centre = <span id="iq-centre-label" style="color:var(--green)">—</span> · ±6 kHz · scroll to zoom · drag to pan · dbl-click reset</span>
           </div>
-          <canvas id="audio-iq-canvas" class="audio-canvas audio-canvas-fill" height="200"></canvas>
+          <canvas id="audio-iq-canvas" class="audio-canvas audio-canvas-fill" height="160"></canvas>
+          <div class="audio-panel-label" style="margin-top:6px">I channel (real)
+            <span class="audio-panel-hint">0 … +6 kHz sideband</span>
+          </div>
+          <canvas id="audio-iq-i-canvas" class="audio-canvas" style="height:90px"></canvas>
+          <div class="audio-panel-label" style="margin-top:4px">Q channel (imaginary)
+            <span class="audio-panel-hint">0 … +6 kHz sideband</span>
+          </div>
+          <canvas id="audio-iq-q-canvas" class="audio-canvas" style="height:90px"></canvas>
         </div>
 
         <!-- 60-second signal + SNR graph -->
