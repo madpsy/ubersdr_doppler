@@ -10,8 +10,10 @@
  *
  *   IQ mode:
  *     • Connects to /api/iq/stream (stereo WAV, I=left Q=right, ±6 kHz)
- *     • Two stacked FFT canvases — I channel on top, Q channel below
- *     • Full ±6 kHz view centred on the carrier frequency
+ *     • Single FFT canvas showing the full complex spectrum ±6 kHz
+ *       centred on the carrier frequency
+ *     • Uses a JS complex FFT (Cooley-Tukey) on time-domain I+Q samples
+ *       so negative frequencies are correctly shown on the left
  *
  * In both modes:
  *   • A single <audio> element is connected to the Web Audio API so that
@@ -70,22 +72,19 @@ const AudioAnalysisModal = (() => {
 
   // Canvas refs
   let fftCanvas     = null;   // audio mode FFT
-  let iqICanvas     = null;   // IQ mode — I channel
-  let iqQCanvas     = null;   // IQ mode — Q channel
+  let iqCanvas      = null;   // IQ mode — single complex spectrum canvas
   let histCanvas    = null;
 
-  // Smoothed FFT magnitude buffers (dB, from AnalyserNode.getFloatFrequencyData)
-  let smoothMag     = null;   // audio mode
-  let smoothMagI    = null;   // IQ mode — I channel
-  let smoothMagQ    = null;   // IQ mode — Q channel
+  // Smoothed FFT magnitude buffers
+  let smoothMag     = null;   // audio mode (from AnalyserNode.getFloatFrequencyData)
+  let smoothMagIQ   = null;   // IQ mode — complex FFT magnitude (FFT_SIZE bins, centred)
   const SMOOTH_ALPHA = 0.3;   // blend factor for new frame (higher = more responsive)
 
   // Smoothed Y-axis scale bounds — updated slowly so the axis doesn't jump every frame.
-  let dbFloorSmooth = null;
-  let dbCeilSmooth  = null;
-  // Per-channel IQ scale smoothing
-  let dbFloorSmoothI = null; let dbCeilSmoothI = null;
-  let dbFloorSmoothQ = null; let dbCeilSmoothQ = null;
+  let dbFloorSmooth  = null;
+  let dbCeilSmooth   = null;
+  let dbFloorSmoothIQ = null;
+  let dbCeilSmoothIQ  = null;
   const SCALE_EXPAND_ALPHA  = 0.15;
   const SCALE_SHRINK_ALPHA  = 0.005;
 
@@ -121,14 +120,13 @@ const AudioAnalysisModal = (() => {
     histSignal.length = 0;
     histSNR.length    = 0;
     smoothMag         = null;
-    smoothMagI        = null;
-    smoothMagQ        = null;
+    smoothMagIQ       = null;
     fftView           = null;
     iqView            = null;
     dbFloorSmooth     = null;
     dbCeilSmooth      = null;
-    dbFloorSmoothI    = null; dbCeilSmoothI = null;
-    dbFloorSmoothQ    = null; dbCeilSmoothQ = null;
+    dbFloorSmoothIQ   = null;
+    dbCeilSmoothIQ    = null;
     _lastReading      = null;
 
     // Show modal
@@ -142,15 +140,13 @@ const AudioAnalysisModal = (() => {
     document.getElementById('iq-centre-label').textContent       = '—';
 
     fftCanvas  = document.getElementById('audio-fft-canvas');
-    iqICanvas  = document.getElementById('audio-iq-i-canvas');
-    iqQCanvas  = document.getElementById('audio-iq-q-canvas');
+    iqCanvas   = document.getElementById('audio-iq-canvas');
     histCanvas = document.getElementById('audio-history-canvas');
 
     // Attach zoom/pan interaction to audio FFT canvas (idempotent)
     attachFFTInteraction(fftCanvas);
-    // Attach zoom/pan interaction to IQ canvases (idempotent)
-    attachIQInteraction(iqICanvas);
-    attachIQInteraction(iqQCanvas);
+    // Attach zoom/pan interaction to IQ canvas (idempotent)
+    attachIQInteraction(iqCanvas);
 
     // Reset resample dropdown to native
     const resampleSel = document.getElementById('audio-resample-select');
@@ -359,12 +355,10 @@ const AudioAnalysisModal = (() => {
     if (_audioCtx)    { _audioCtx.close().catch(() => {}); _audioCtx = null; }
     if (_animFrame)   { cancelAnimationFrame(_animFrame);  _animFrame = null; }
     // Reset smoothing buffers so the new stream starts fresh
-    smoothMag  = null;
-    smoothMagI = null;
-    smoothMagQ = null;
-    dbFloorSmooth = null; dbCeilSmooth = null;
-    dbFloorSmoothI = null; dbCeilSmoothI = null;
-    dbFloorSmoothQ = null; dbCeilSmoothQ = null;
+    smoothMag   = null;
+    smoothMagIQ = null;
+    dbFloorSmooth   = null; dbCeilSmooth   = null;
+    dbFloorSmoothIQ = null; dbCeilSmoothIQ = null;
   }
 
   // ---------------------------------------------------------------------------
@@ -454,8 +448,7 @@ const AudioAnalysisModal = (() => {
     if (_mode === 'audio') {
       drawFFT();
     } else {
-      if (iqICanvas) drawIQFFT(iqICanvas, _analyserI, 'I', '#58a6ff', 'smoothMagI', 'I');
-      if (iqQCanvas) drawIQFFT(iqQCanvas, _analyserQ, 'Q', '#f0883e', 'smoothMagQ', 'Q');
+      if (iqCanvas) drawComplexIQFFT(iqCanvas);
     }
     drawHistory();
     _animFrame = requestAnimationFrame(renderLoop);
@@ -528,19 +521,15 @@ const AudioAnalysisModal = (() => {
   }
 
   // ---------------------------------------------------------------------------
-  // IQ canvas zoom/pan interaction — both I and Q canvases share iqView
+  // IQ canvas zoom/pan interaction — single complex-spectrum canvas
+  // iqView is in complex-FFT bin space: 0 = −Nyquist, FFT_SIZE−1 = +Nyquist
   // ---------------------------------------------------------------------------
   function attachIQInteraction(canvas) {
     if (!canvas || canvas._iqInteractionAttached) return;
     canvas._iqInteractionAttached = true;
 
     function getFullRange() {
-      const binHz = (_sampleRate || 12000) / FFT_SIZE;
-      const half  = FFT_SIZE / 2;
-      return {
-        lo: 0,
-        hi: Math.min(half - 1, Math.round(IQ_BW_HZ / binHz)),
-      };
+      return { lo: 0, hi: FFT_SIZE - 1 };
     }
 
     function getView() {
@@ -775,23 +764,56 @@ const AudioAnalysisModal = (() => {
   }
 
   // ---------------------------------------------------------------------------
-  // Draw one IQ channel FFT canvas (I or Q)
-  // analyser  — the AnalyserNode for this channel
-  // smoothKey — 'smoothMagI' or 'smoothMagQ' (string key into closure vars)
-  // floorKey  — 'I' or 'Q' (used to pick the right smoothed scale vars)
-  // barColour — CSS colour string for the spectrum bars
+  // Complex FFT (Cooley-Tukey, in-place, radix-2 DIT)
+  // re[] and im[] are input/output arrays of length N (must be power of 2).
+  // After the call, re[k] + j*im[k] is the k-th DFT bin.
   // ---------------------------------------------------------------------------
-  function drawIQFFT(canvas, analyser, channelLabel, barColour, smoothKey, scaleKey) {
-    if (!canvas || !analyser) return;
+  function complexFFT(re, im) {
+    const N = re.length;
+    // Bit-reversal permutation
+    let j = 0;
+    for (let i = 1; i < N; i++) {
+      let bit = N >> 1;
+      for (; j & bit; bit >>= 1) j ^= bit;
+      j ^= bit;
+      if (i < j) {
+        [re[i], re[j]] = [re[j], re[i]];
+        [im[i], im[j]] = [im[j], im[i]];
+      }
+    }
+    // Butterfly stages
+    for (let len = 2; len <= N; len <<= 1) {
+      const ang = -2 * Math.PI / len;
+      const wRe = Math.cos(ang), wIm = Math.sin(ang);
+      for (let i = 0; i < N; i += len) {
+        let curRe = 1, curIm = 0;
+        for (let k = 0; k < len / 2; k++) {
+          const uRe = re[i + k],           uIm = im[i + k];
+          const vRe = re[i + k + len / 2], vIm = im[i + k + len / 2];
+          const tRe = curRe * vRe - curIm * vIm;
+          const tIm = curRe * vIm + curIm * vRe;
+          re[i + k]           = uRe + tRe;  im[i + k]           = uIm + tIm;
+          re[i + k + len / 2] = uRe - tRe;  im[i + k + len / 2] = uIm - tIm;
+          const nextRe = curRe * wRe - curIm * wIm;
+          curIm = curRe * wIm + curIm * wRe;
+          curRe = nextRe;
+        }
+      }
+    }
+  }
 
-    // Pick the right smoothing buffer and scale vars by channel
-    let smoothBuf   = scaleKey === 'I' ? smoothMagI   : smoothMagQ;
-    let floorSmooth = scaleKey === 'I' ? dbFloorSmoothI : dbFloorSmoothQ;
-    let ceilSmooth  = scaleKey === 'I' ? dbCeilSmoothI  : dbCeilSmoothQ;
+  // ---------------------------------------------------------------------------
+  // Draw the complex IQ spectrum canvas.
+  // Uses time-domain samples from _analyserI (real) and _analyserQ (imag),
+  // computes a complex FFT, fftshifts the result, and displays magnitude in dB.
+  // The x-axis spans −IQ_BW_HZ … 0 … +IQ_BW_HZ centred on the carrier.
+  // ---------------------------------------------------------------------------
+  function drawComplexIQFFT(canvas) {
+    if (!canvas || !_analyserI || !_analyserQ) return;
 
     const dpr  = window.devicePixelRatio || 1;
     const cssW = canvas.clientWidth  || 760;
-    const cssH = canvas.clientHeight || 130;
+    const cssH = canvas.clientHeight || 200;
     const W    = Math.round(cssW * dpr);
     const H    = Math.round(cssH * dpr);
     if (canvas.width !== W || canvas.height !== H) {
@@ -800,7 +822,6 @@ const AudioAnalysisModal = (() => {
     const ctx = canvas.getContext('2d');
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     const CW = cssW, CH = cssH;
-
     const ML = 46, MB = 20;
     const plotW = CW - ML, plotH = CH - MB;
 
@@ -808,64 +829,88 @@ const AudioAnalysisModal = (() => {
     ctx.fillStyle = '#0d1117';
     ctx.fillRect(0, 0, CW, CH);
 
-    const half = analyser.frequencyBinCount; // FFT_SIZE / 2
-    const freqData = new Float32Array(half);
-    analyser.getFloatFrequencyData(freqData);
+    // We use a smaller FFT size for the complex FFT to keep it fast in JS.
+    // 4096 gives ~2.9 Hz/bin at 12 kHz — plenty of resolution for ±6 kHz.
+    const N = 4096;
+    const re = new Float32Array(N);
+    const im = new Float32Array(N);
 
-    // Check for real data
+    // Read time-domain samples from both analysers (they share the same FFT_SIZE)
+    const tdI = new Float32Array(_analyserI.fftSize);
+    const tdQ = new Float32Array(_analyserQ.fftSize);
+    _analyserI.getFloatTimeDomainData(tdI);
+    _analyserQ.getFloatTimeDomainData(tdQ);
+
+    // Check for real data (non-silent)
     let hasData = false;
-    for (let i = 1; i < half; i++) {
-      if (isFinite(freqData[i]) && freqData[i] > -140) { hasData = true; break; }
+    for (let i = 0; i < Math.min(N, tdI.length); i++) {
+      if (Math.abs(tdI[i]) > 1e-6 || Math.abs(tdQ[i]) > 1e-6) { hasData = true; break; }
     }
     if (!hasData) {
       ctx.fillStyle = '#8b949e';
       ctx.font = '11px sans-serif';
       ctx.textAlign = 'center';
-      ctx.fillText(`Buffering IQ (${channelLabel})…`, ML + plotW / 2, CH / 2);
+      ctx.fillText('Buffering IQ…', ML + plotW / 2, CH / 2);
       return;
     }
 
+    // Apply Hann window and copy into re/im
+    for (let i = 0; i < N; i++) {
+      const w = 0.5 * (1 - Math.cos(2 * Math.PI * i / (N - 1)));
+      re[i] = (tdI[i] || 0) * w;
+      im[i] = (tdQ[i] || 0) * w;
+    }
+
+    complexFFT(re, im);
+
+    // Compute magnitude in dB and fftshift (swap halves so DC is in the centre)
+    // After fftshift: index 0 = −Nyquist, index N/2 = DC (carrier), index N−1 = +Nyquist
+    const mag = new Float32Array(N);
+    const half = N / 2;
+    for (let i = 0; i < N; i++) {
+      const shifted = (i + half) % N; // fftshift
+      const m = Math.sqrt(re[shifted] * re[shifted] + im[shifted] * im[shifted]) / N;
+      mag[i] = m > 0 ? 20 * Math.log10(m) : -140;
+    }
+
     // Smooth
-    if (!smoothBuf || smoothBuf.length !== half) {
-      smoothBuf = new Float32Array(freqData);
+    if (!smoothMagIQ || smoothMagIQ.length !== N) {
+      smoothMagIQ = new Float32Array(mag);
     } else {
-      for (let i = 0; i < half; i++) {
-        if (isFinite(freqData[i])) {
-          smoothBuf[i] = smoothBuf[i] * (1 - SMOOTH_ALPHA) + freqData[i] * SMOOTH_ALPHA;
+      for (let i = 0; i < N; i++) {
+        if (isFinite(mag[i])) {
+          smoothMagIQ[i] = smoothMagIQ[i] * (1 - SMOOTH_ALPHA) + mag[i] * SMOOTH_ALPHA;
         }
       }
     }
-    // Write back to closure variable
-    if (scaleKey === 'I') smoothMagI = smoothBuf; else smoothMagQ = smoothBuf;
 
-    // IQ view: the Web Audio API gives us bins 0…half-1 where bin i = i * sr / FFT_SIZE Hz
-    // (audio-relative, DC = carrier). We show bins 0…bwBin (= IQ_BW_HZ / binHz).
-    // The x-axis is labelled as Hz offset from carrier (0 … +IQ_BW_HZ).
-    const binHz  = _sampleRate / FFT_SIZE;
-    const bwBin  = Math.min(half - 1, Math.round(IQ_BW_HZ / binHz));
+    // Frequency axis: bin i → freqOffset = (i − N/2) * (sampleRate / N)
+    // Full range: −sampleRate/2 … +sampleRate/2
+    // We only show ±IQ_BW_HZ (the actual signal bandwidth)
+    const binHz   = _sampleRate / N;
+    const bwBins  = Math.round(IQ_BW_HZ / binHz); // bins from centre to edge
+    const fullLo  = half - bwBins;
+    const fullHi  = half + bwBins;
 
-    // Apply iqView zoom/pan (shared with the other IQ canvas)
-    const fullLo = 0, fullHi = bwBin;
+    // Apply iqView zoom/pan
     if (!iqView) iqView = { lo: fullLo, hi: fullHi };
-    const binLow  = Math.max(fullLo, Math.round(iqView.lo));
-    const binHigh = Math.min(fullHi, Math.round(iqView.hi));
+    const binLow  = Math.max(0,   Math.round(iqView.lo));
+    const binHigh = Math.min(N-1, Math.round(iqView.hi));
     const numBins = binHigh - binLow + 1;
 
-    // Offset-from-carrier axis: bin i → offsetHz = i * binHz
-    // freqStart/freqEnd are offsets (Hz), not absolute frequencies.
-    const offsetStart = binLow  * binHz;
-    const offsetEnd   = binHigh * binHz;
+    // Offset from carrier: bin i → (i − N/2) * binHz
+    const offsetStart = (binLow  - half) * binHz;
+    const offsetEnd   = (binHigh - half) * binHz;
     const offsetSpan  = (offsetEnd - offsetStart) || 1;
 
-    // binToX maps a bin index to canvas x
     const binToX = i => ML + ((i - binLow) / Math.max(1, numBins - 1)) * plotW;
 
-    // dB range — computed over the visible bin range
+    // dB range
     let noiseFloorDB = -100, peakDB = -40;
     {
       const vals = [];
       for (let i = binLow; i <= binHigh; i++) {
-        if (isFinite(smoothBuf[i])) vals.push(smoothBuf[i]);
+        if (isFinite(smoothMagIQ[i])) vals.push(smoothMagIQ[i]);
       }
       if (vals.length > 0) {
         vals.sort((a, b) => a - b);
@@ -875,29 +920,25 @@ const AudioAnalysisModal = (() => {
     }
     if (peakDB - noiseFloorDB < 40) peakDB = noiseFloorDB + 40;
 
-    if (floorSmooth === null) { floorSmooth = noiseFloorDB; ceilSmooth = peakDB; }
-    floorSmooth = floorSmooth * (1 - SCALE_SHRINK_ALPHA) + noiseFloorDB * SCALE_SHRINK_ALPHA;
-    if (peakDB > ceilSmooth) {
-      ceilSmooth = ceilSmooth * (1 - SCALE_EXPAND_ALPHA) + peakDB * SCALE_EXPAND_ALPHA;
+    if (dbFloorSmoothIQ === null) { dbFloorSmoothIQ = noiseFloorDB; dbCeilSmoothIQ = peakDB; }
+    dbFloorSmoothIQ = dbFloorSmoothIQ * (1 - SCALE_SHRINK_ALPHA) + noiseFloorDB * SCALE_SHRINK_ALPHA;
+    if (peakDB > dbCeilSmoothIQ) {
+      dbCeilSmoothIQ = dbCeilSmoothIQ * (1 - SCALE_EXPAND_ALPHA) + peakDB * SCALE_EXPAND_ALPHA;
     } else {
-      ceilSmooth = ceilSmooth * (1 - SCALE_SHRINK_ALPHA) + peakDB * SCALE_SHRINK_ALPHA;
+      dbCeilSmoothIQ = dbCeilSmoothIQ * (1 - SCALE_SHRINK_ALPHA) + peakDB * SCALE_SHRINK_ALPHA;
     }
-    // Write back scale vars
-    if (scaleKey === 'I') { dbFloorSmoothI = floorSmooth; dbCeilSmoothI = ceilSmooth; }
-    else                  { dbFloorSmoothQ = floorSmooth; dbCeilSmoothQ = ceilSmooth; }
 
-    const dbFloor = Math.floor(floorSmooth / 10) * 10 - 20;
-    const dbCeil  = Math.ceil(ceilSmooth   / 10) * 10 + 5;
+    const dbFloor = Math.floor(dbFloorSmoothIQ / 10) * 10 - 20;
+    const dbCeil  = Math.ceil(dbCeilSmoothIQ   / 10) * 10 + 5;
     const dbRange = dbCeil - dbFloor || 10;
     const dbToY   = db => plotH - ((db - dbFloor) / dbRange) * plotH;
 
     // Spectrum bars
-    const colour88 = barColour + '88';
-    ctx.fillStyle = colour88;
+    ctx.fillStyle = '#58a6ff88';
     const barW = Math.max(1, plotW / numBins);
     for (let i = binLow; i <= binHigh; i++) {
       const x = binToX(i);
-      const y = dbToY(isFinite(smoothBuf[i]) ? smoothBuf[i] : dbFloor);
+      const y = dbToY(isFinite(smoothMagIQ[i]) ? smoothMagIQ[i] : dbFloor);
       ctx.fillRect(x, y, barW, plotH - y);
     }
 
@@ -917,14 +958,16 @@ const AudioAnalysisModal = (() => {
       ctx.setLineDash([]);
     }
 
-    // X axis — offset from carrier in Hz (0 … +IQ_BW_HZ)
-    // Labels show Hz offset; unit label shows the carrier frequency.
+    // X axis — absolute frequency labels (like audio FFT), adaptive precision.
+    // offsetSpan is in Hz; absolute freq = _carrierFreqHz + offset.
+    // We pick a nice step in Hz and compute decimal places for MHz labels.
     const rawStep   = offsetSpan / 6;
     const mag10     = Math.pow(10, Math.floor(Math.log10(Math.abs(rawStep) || 1)));
     const niceSteps = [1, 2, 5, 10, 20, 50, 100, 200, 500, 1000, 2000, 5000];
     let freqStep    = (niceSteps.find(v => v * mag10 >= rawStep) || 100) * mag10;
     if (freqStep < 1) freqStep = 1;
-    const hzDecimals = freqStep >= 1000 ? 1 : 0;
+    // Decimal places for MHz: step 1 Hz → 6 dp, 10 Hz → 5 dp, 100 Hz → 4 dp, 1 kHz → 3 dp, etc.
+    const mhzDecimals = Math.max(0, Math.ceil(-Math.log10(freqStep / 1e6)));
 
     ctx.font = '9px sans-serif';
     ctx.textAlign = 'center';
@@ -933,42 +976,33 @@ const AudioAnalysisModal = (() => {
       const x = ML + ((f - offsetStart) / offsetSpan) * plotW;
       if (x < ML - 1 || x > CW + 1) continue;
       ctx.fillStyle = '#8b949e';
-      // Show as kHz offset if ≥1000 Hz, else Hz
-      const label = f >= 1000 ? `+${(f / 1000).toFixed(hzDecimals)}k` : `+${f.toFixed(0)}`;
-      ctx.fillText(label, x, CH - 3);
+      const absFreqMHz = (_carrierFreqHz + f) / 1e6;
+      ctx.fillText(absFreqMHz.toFixed(mhzDecimals), x, CH - 3);
       ctx.strokeStyle = '#21262d';
       ctx.lineWidth = 1;
       ctx.setLineDash([2, 2]);
       ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, plotH); ctx.stroke();
       ctx.setLineDash([]);
     }
-    // Unit label: show carrier frequency so user knows the absolute reference
     ctx.textAlign = 'right';
     ctx.fillStyle = '#555';
-    ctx.fillText(`offset from ${fmtHzLocal(_carrierFreqHz)}`, CW - 2, CH - 3);
+    ctx.fillText('MHz', CW - 2, CH - 3);
 
-    // Carrier marker (green dashed) — at bin 0 = 0 Hz offset = carrier
+    // Carrier marker (green dashed) — at offset 0 = centre of the spectrum
     {
       const carrierX = ML + ((0 - offsetStart) / offsetSpan) * plotW;
       if (carrierX >= ML && carrierX <= CW) {
-      const cx = carrierX;
-      ctx.strokeStyle = '#3fb950';
-      ctx.lineWidth = 1.5;
-      ctx.setLineDash([4, 3]);
-      ctx.beginPath(); ctx.moveTo(cx, 0); ctx.lineTo(cx, plotH); ctx.stroke();
-      ctx.setLineDash([]);
-      ctx.fillStyle = '#3fb950';
-      ctx.font = '9px sans-serif';
-      ctx.textAlign = 'left';
-      ctx.fillText('carrier', cx + 3, 10);
-      } // end if carrierX in view
+        ctx.strokeStyle = '#3fb950';
+        ctx.lineWidth = 1.5;
+        ctx.setLineDash([4, 3]);
+        ctx.beginPath(); ctx.moveTo(carrierX, 0); ctx.lineTo(carrierX, plotH); ctx.stroke();
+        ctx.setLineDash([]);
+        ctx.fillStyle = '#3fb950';
+        ctx.font = '9px sans-serif';
+        ctx.textAlign = 'left';
+        ctx.fillText(fmtHzLocal(_carrierFreqHz), carrierX + 3, 10);
+      }
     }
-
-    // Channel label (top-right)
-    ctx.fillStyle = barColour;
-    ctx.font = 'bold 10px sans-serif';
-    ctx.textAlign = 'right';
-    ctx.fillText(channelLabel, CW - 4, 12);
 
     // Axis border
     ctx.strokeStyle = '#30363d';
