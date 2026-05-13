@@ -295,18 +295,15 @@ const AudioAnalysisModal = (() => {
     _analyserQ.minDecibels           = -140;
     _analyserQ.maxDecibels           = 0;
 
-    // Route: source → splitter → analyserI / analyserQ → silentGain → destination
-    // The silent gain (volume=0) keeps the Web Audio graph active so the browser
-    // actually decodes the stream and feeds data to the AnalyserNodes.
-    // We must NOT set muted=true on the <audio> element — muted elements are not
-    // decoded by the Web Audio API in most browsers, which prevents FFT data.
+    // Route: source → splitter → analyserI/Q → merger → destination (stereo I=L, Q=R)
+    // Connecting through the graph (rather than muting the element) ensures the browser
+    // decodes the stream and feeds time-domain data to the AnalyserNodes.
     _splitter.connect(_analyserI, 0);
     _splitter.connect(_analyserQ, 1);
-    const silentGain = _audioCtx.createGain();
-    silentGain.gain.value = 0;
-    _analyserI.connect(silentGain);
-    _analyserQ.connect(silentGain);
-    silentGain.connect(_audioCtx.destination);
+    const merger = _audioCtx.createChannelMerger(2);
+    _analyserI.connect(merger, 0, 0); // I → left
+    _analyserQ.connect(merger, 0, 1); // Q → right
+    merger.connect(_audioCtx.destination);
 
     const BASE   = (window.BASE_PATH || '').replace(/\/$/, '');
     const iqUrl  = `${BASE}/api/iq/stream?station=${encodeURIComponent(_label)}`;
