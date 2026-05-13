@@ -322,6 +322,9 @@ type DopplerStation struct {
 	// audioHub fans out PCM audio to preview listeners.
 	audioHub *audioBroadcastHub
 
+	// iqHub fans out raw IQ samples (S16LE interleaved I/Q) to IQ stream listeners.
+	iqHub *audioBroadcastHub
+
 	// sessionID is the active user_session_id shared between the spectrum and
 	// audio WebSocket connections. Set by runSpectrumLoop after a successful
 	// /connection call; read by runAudioLoop so both connections share the same
@@ -330,8 +333,10 @@ type DopplerStation struct {
 	sessionID string
 
 	// streamSampleRate is set from the first audio packet header.
+	// iqSampleRate is set from the first IQ packet header.
 	streamMu         sync.RWMutex
 	streamSampleRate int
+	iqSampleRate     int
 
 	// Measurement state — protected by mu.
 	mu          sync.RWMutex
@@ -378,6 +383,7 @@ func newDopplerStation(cfg stationConfig, ubersdrURL, dataDir string, hub *sseHu
 		hub:              hub,
 		csvWriter:        cw,
 		audioHub:         newAudioBroadcastHub(),
+		iqHub:            newAudioBroadcastHub(),
 		cancel:           func() {}, // no-op until run() is started
 	}
 }
@@ -638,6 +644,13 @@ func (ds *DopplerStation) run(ctx context.Context) {
 	go func() {
 		defer wg.Done()
 		ds.runAudioLoop(ctx)
+	}()
+
+	// IQ loop — streams raw IQ (stereo WAV) only when there are listeners
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		ds.runIQLoop(ctx)
 	}()
 
 	wg.Wait()
@@ -1096,6 +1109,158 @@ func (ds *DopplerStation) runAudioLoop(ctx context.Context) {
 
 		connCancel()
 		// Brief pause before reconnecting (avoids hammering UberSDR on errors).
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(2 * time.Second):
+		}
+	}
+}
+
+// runIQLoop connects to UberSDR's audio WebSocket in IQ mode for raw IQ streaming.
+// Only maintains the connection when there are active IQ stream listeners.
+// Disconnects immediately when the last listener unsubscribes (via iqHub.drained()).
+// IQ mode delivers interleaved S16LE I/Q pairs at the station's carrier frequency,
+// with a ±6 kHz bandwidth (12 kHz total), giving a 12 kHz-wide IQ capture window.
+func (ds *DopplerStation) runIQLoop(ctx context.Context) {
+	dec, err := newPCMDecoder()
+	if err != nil {
+		log.Printf("[%s] iq: decoder init failed: %v", ds.cfg.Label, err)
+		return
+	}
+	defer dec.close()
+
+	for {
+		if ctx.Err() != nil {
+			return
+		}
+
+		// Wait until there is at least one IQ stream listener.
+		if !ds.iqHub.hasListeners() {
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(500 * time.Millisecond):
+			}
+			continue
+		}
+
+		// Snapshot the drained channel before connecting.
+		drainedCh := ds.iqHub.drained()
+
+		// Reuse the spectrum session UUID so all three connections share the same
+		// user_session_id. Fall back to a fresh UUID if the spectrum loop hasn't
+		// connected yet.
+		ds.sessionMu.RLock()
+		sessionID := ds.sessionID
+		ds.sessionMu.RUnlock()
+		if sessionID == "" {
+			sessionID = uuid.New().String()
+		}
+		if err := ds.checkConnection(sessionID); err != nil {
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(10 * time.Second):
+			}
+			continue
+		}
+
+		// IQ mode: tuned directly to the carrier frequency (no dial offset).
+		// bandwidthLow=-6000 / bandwidthHigh=6000 → 12 kHz capture window.
+		iqParams := url.Values{}
+		iqParams.Set("format", "pcm-zstd")
+		iqParams.Set("version", "2")
+		iqParams.Set("bandwidthLow", "-6000")
+		iqParams.Set("bandwidthHigh", "6000")
+		// Pass 0 for dialFreqHz so audioWSURL uses the station's nominal carrier.
+		wsAddr := ds.audioWSURL("iq", iqParams, sessionID, 0)
+
+		hdr := http.Header{}
+		hdr.Set("User-Agent", "ubersdr_doppler/1.0")
+		conn, _, err := wsDialer.Dial(wsAddr, hdr)
+		if err != nil {
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(10 * time.Second):
+			}
+			continue
+		}
+
+		log.Printf("[%s] iq stream connected", ds.cfg.Label)
+
+		connCtx, connCancel := context.WithCancel(ctx)
+
+		// Keepalive pings
+		go func() {
+			ticker := time.NewTicker(30 * time.Second)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-connCtx.Done():
+					return
+				case <-ticker.C:
+					conn.WriteJSON(map[string]string{"type": "ping"}) //nolint:errcheck
+				}
+			}
+		}()
+
+		// Read loop in its own goroutine so we can select on drainedCh.
+		type readResult struct {
+			msgType int
+			msg     []byte
+			err     error
+		}
+		readCh := make(chan readResult, 4)
+		go func() {
+			for {
+				mt, m, e := conn.ReadMessage()
+				readCh <- readResult{mt, m, e}
+				if e != nil {
+					return
+				}
+			}
+		}()
+
+	readLoop:
+		for {
+			select {
+			case <-ctx.Done():
+				connCancel()
+				conn.Close() //nolint:errcheck
+				return
+
+			case <-drainedCh:
+				log.Printf("[%s] iq stream: no listeners, disconnecting", ds.cfg.Label)
+				connCancel()
+				conn.Close() //nolint:errcheck
+				break readLoop
+
+			case res := <-readCh:
+				if res.err != nil {
+					connCancel()
+					conn.Close() //nolint:errcheck
+					break readLoop
+				}
+				if res.msgType != websocket.BinaryMessage {
+					continue
+				}
+				pkt, err := dec.decode(res.msg, true)
+				if err != nil || len(pkt.pcm) == 0 {
+					continue
+				}
+				// Update IQ sample rate from full-header packets (channels=2 for IQ).
+				if pkt.sampleRate > 0 {
+					ds.streamMu.Lock()
+					ds.iqSampleRate = pkt.sampleRate
+					ds.streamMu.Unlock()
+				}
+				ds.iqHub.broadcast(pkt.pcm)
+			}
+		}
+
+		connCancel()
 		select {
 		case <-ctx.Done():
 			return

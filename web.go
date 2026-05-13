@@ -972,6 +972,111 @@ func startHTTPServer(
 		}
 	})
 
+	// ── IQ info ────────────────────────────────────────────────────────────
+	// GET /api/iq/info?station=<label>
+	// Returns the sample rate and centre frequency for the IQ stream.
+	// The IQ stream is centred on the station's carrier frequency with a
+	// ±6 kHz bandwidth (12 kHz total capture window).
+	mux.HandleFunc("/api/iq/info", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		label := r.URL.Query().Get("station")
+		if label == "" {
+			http.Error(w, "station parameter required", http.StatusBadRequest)
+			return
+		}
+		var target *DopplerStation
+		for _, ds := range mgr.list() {
+			if ds.cfg.Label == label {
+				target = ds
+				break
+			}
+		}
+		if target == nil {
+			http.Error(w, "station not found", http.StatusNotFound)
+			return
+		}
+		target.streamMu.RLock()
+		sr := target.iqSampleRate
+		target.streamMu.RUnlock()
+		if sr == 0 {
+			sr = 12000 // default before first packet arrives
+		}
+		jsonResponse(w, map[string]interface{}{
+			"sample_rate":    sr,
+			"centre_freq_hz": target.cfg.FreqHz,
+			"bandwidth_hz":   12000,
+			"label":          label,
+		})
+	})
+
+	// ── IQ stream ──────────────────────────────────────────────────────────
+	// GET /api/iq/stream?station=<label>
+	// Streams a live stereo WAV of raw IQ samples centred on the station's
+	// carrier frequency (±6 kHz, 12 kHz bandwidth).
+	// Format: audio/wav, 2 channels (I = left, Q = right), S16LE PCM.
+	// The connection is established on demand and dropped when the client
+	// disconnects. Compatible with SDR tools and the Web Audio API.
+	mux.HandleFunc("/api/iq/stream", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		label := r.URL.Query().Get("station")
+		if label == "" {
+			http.Error(w, "station parameter required", http.StatusBadRequest)
+			return
+		}
+		var target *DopplerStation
+		for _, ds := range mgr.list() {
+			if ds.cfg.Label == label {
+				target = ds
+				break
+			}
+		}
+		if target == nil {
+			http.Error(w, "station not found", http.StatusNotFound)
+			return
+		}
+
+		// Get IQ sample rate (default 12000 if not yet known).
+		target.streamMu.RLock()
+		sr := target.iqSampleRate
+		target.streamMu.RUnlock()
+		if sr == 0 {
+			sr = 12000
+		}
+
+		// Write a streaming stereo WAV header (I = left channel, Q = right channel).
+		writeStreamingWAVHeader(w, sr, 2)
+		flusher, ok := w.(http.Flusher)
+		if ok {
+			flusher.Flush()
+		}
+
+		iqCh := target.iqHub.subscribe()
+		defer target.iqHub.unsubscribe(iqCh)
+
+		for {
+			select {
+			case <-r.Context().Done():
+				return
+			case chunk, ok := <-iqCh:
+				if !ok {
+					return
+				}
+				if _, err := w.Write(chunk); err != nil {
+					return
+				}
+				if flusher != nil {
+					flusher.Flush()
+				}
+			}
+		}
+	})
+
 	// ── Receiver description proxy ─────────────────────────────────────────
 	// GET /api/description — proxies UberSDR's /api/description and caches the
 	// result so the frontend can call BASE+/api/description regardless of whether

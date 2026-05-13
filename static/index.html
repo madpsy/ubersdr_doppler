@@ -65,12 +65,17 @@
       <div id="audio-modal-status" class="audio-status-bar">
         <span id="audio-status-text" class="audio-status-connecting">⬤ Connecting…</span>
         <span id="audio-fft-info" style="margin-left:16px;color:var(--muted);font-size:0.78rem"></span>
+        <!-- Audio / IQ mode toggle -->
+        <span class="audio-mode-toggle" style="margin-left:auto">
+          <button id="audio-mode-audio" class="btn btn-sm btn-mode active" title="Audio preview (USB, 300–1500 Hz passband)">🎧 Audio</button>
+          <button id="audio-mode-iq"    class="btn btn-sm btn-mode"        title="Raw IQ stream (±6 kHz, I=left Q=right)">📡 IQ</button>
+        </span>
       </div>
 
       <!-- Side-by-side panels -->
       <div class="audio-panels-row">
-        <!-- FFT spectrum -->
-        <div class="audio-panel audio-panel-fft">
+        <!-- FFT spectrum — audio mode -->
+        <div class="audio-panel audio-panel-fft" id="audio-fft-panel">
           <div class="audio-panel-label">FFT Spectrum
             <span class="audio-panel-hint">carrier = <span id="fft-carrier-label" style="color:var(--green)">—</span> · scroll to zoom · drag to pan · dbl-click reset</span>
             <span class="audio-panel-toggles">
@@ -83,6 +88,16 @@
             </span>
           </div>
           <canvas id="audio-fft-canvas" class="audio-canvas audio-canvas-fill" height="200"></canvas>
+        </div>
+
+        <!-- IQ spectrum — IQ mode (I on top, Q below), hidden until IQ mode active -->
+        <div class="audio-panel audio-panel-fft" id="iq-fft-panel" style="display:none">
+          <div class="audio-panel-label">IQ Spectrum — I channel
+            <span class="audio-panel-hint">centre = <span id="iq-centre-label" style="color:var(--green)">—</span> · ±6 kHz · scroll to zoom · drag to pan · dbl-click reset</span>
+          </div>
+          <canvas id="audio-iq-i-canvas" class="audio-canvas audio-canvas-fill" height="160"></canvas>
+          <div class="audio-panel-label" style="margin-top:6px">IQ Spectrum — Q channel</div>
+          <canvas id="audio-iq-q-canvas" class="audio-canvas audio-canvas-fill" height="160"></canvas>
         </div>
 
         <!-- 60-second signal + SNR graph -->

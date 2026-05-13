@@ -1,16 +1,23 @@
 /* audio-analysis.js — Live audio analysis modal for ubersdr_doppler
  *
  * Opens when the user clicks "Listen" on a station row.
- * Uses a single <audio> element connected to the Web Audio API so that:
- *   • The browser plays the audio normally
- *   • An AnalyserNode provides real-time FFT data for the spectrum display
- *   • No duplicate HTTP connections are opened
+ * Supports two modes selectable via the Audio / IQ toggle buttons:
  *
- * Draws:
- *   1. FFT spectrum with real-world frequency axis
- *      (dial_freq_hz + bin_hz, so the carrier appears at carrier_freq_hz)
- *   2. 60-second rolling history of signal power (dBFS) and SNR (dB)
- *      sourced from the SSE live feed already running in app.js
+ *   Audio mode (default):
+ *     • Connects to /api/audio/preview (USB, 300–1500 Hz passband)
+ *     • Single FFT spectrum canvas with real-world frequency axis
+ *     • Carrier expected/actual marker lines
+ *
+ *   IQ mode:
+ *     • Connects to /api/iq/stream (stereo WAV, I=left Q=right, ±6 kHz)
+ *     • Two stacked FFT canvases — I channel on top, Q channel below
+ *     • Full ±6 kHz view centred on the carrier frequency
+ *
+ * In both modes:
+ *   • A single <audio> element is connected to the Web Audio API so that
+ *     the browser plays the audio and an AnalyserNode provides FFT data
+ *   • 60-second rolling history of signal power (dBFS) and SNR (dB)
+ *     sourced from the SSE live feed already running in app.js
  */
 'use strict';
 
@@ -18,7 +25,7 @@
 // AudioAnalysisModal — self-contained controller
 // ---------------------------------------------------------------------------
 const AudioAnalysisModal = (() => {
-  // State
+  // ── State ────────────────────────────────────────────────────────────────
   let _label          = null;
   let _dialFreqHz     = 0;
   let _carrierFreqHz  = 0;
@@ -27,6 +34,7 @@ const AudioAnalysisModal = (() => {
   let _lastReading    = null;  // most recent SSE reading for the active station
   let _showExpected   = true;  // show green 'expected' carrier line
   let _showActual     = true;  // show red 'actual' detected frequency line
+  let _mode           = 'audio'; // 'audio' | 'iq'
 
   // Audio passband limits (Hz, audio-relative from dial frequency).
   // Must match the bandwidthLow/bandwidthHigh sent to UberSDR in doppler.go.
@@ -34,11 +42,17 @@ const AudioAnalysisModal = (() => {
   const PASSBAND_LOW  = 300;   // Hz above dial frequency
   const PASSBAND_HIGH = 1500;  // Hz above dial frequency
 
+  // IQ bandwidth: ±6 kHz centred on the carrier.
+  const IQ_BW_HZ = 6000; // half-bandwidth
+
   // Web Audio API objects
   let _audioCtx     = null;
   let _audioEl      = null;   // <audio> element — single connection for play + FFT
-  let _analyser     = null;   // AnalyserNode
+  let _analyser     = null;   // AnalyserNode (mono for audio; stereo splitter for IQ)
+  let _analyserI    = null;   // AnalyserNode for I channel (IQ mode)
+  let _analyserQ    = null;   // AnalyserNode for Q channel (IQ mode)
   let _sourceNode   = null;   // MediaElementSourceNode
+  let _splitter     = null;   // ChannelSplitterNode (IQ mode)
 
   // rAF render loop handle
   let _animFrame    = null;
@@ -54,40 +68,37 @@ const AudioAnalysisModal = (() => {
   const histSNR     = [];     // {t, v} dB
 
   // Canvas refs
-  let fftCanvas     = null;
+  let fftCanvas     = null;   // audio mode FFT
+  let iqICanvas     = null;   // IQ mode — I channel
+  let iqQCanvas     = null;   // IQ mode — Q channel
   let histCanvas    = null;
 
-  // Smoothed FFT magnitude buffer (dB, from AnalyserNode.getFloatFrequencyData)
-  let smoothMag     = null;
+  // Smoothed FFT magnitude buffers (dB, from AnalyserNode.getFloatFrequencyData)
+  let smoothMag     = null;   // audio mode
+  let smoothMagI    = null;   // IQ mode — I channel
+  let smoothMagQ    = null;   // IQ mode — Q channel
   const SMOOTH_ALPHA = 0.3;   // blend factor for new frame (higher = more responsive)
 
   // Smoothed Y-axis scale bounds — updated slowly so the axis doesn't jump every frame.
-  // dbFloorSmooth tracks the noise floor (decays down slowly, snaps up quickly).
-  // dbCeilSmooth  tracks the peak    (snaps up quickly, decays down slowly).
   let dbFloorSmooth = null;
   let dbCeilSmooth  = null;
-  // How quickly the scale expands (fast) vs contracts (slow).
-  const SCALE_EXPAND_ALPHA  = 0.15;  // fast: new peak appears → scale grows quickly
-  const SCALE_SHRINK_ALPHA  = 0.005; // slow: peak gone → scale shrinks over ~200 frames
+  // Per-channel IQ scale smoothing
+  let dbFloorSmoothI = null; let dbCeilSmoothI = null;
+  let dbFloorSmoothQ = null; let dbCeilSmoothQ = null;
+  const SCALE_EXPAND_ALPHA  = 0.15;
+  const SCALE_SHRINK_ALPHA  = 0.005;
 
-  // FFT zoom/pan state (in passband-bin space)
-  // binView: { lo, hi } — the range of passband bins currently visible
-  // null = full passband view (reset on open)
+  // FFT zoom/pan state (in passband-bin space) — audio mode only
   let fftView = null; // { lo: number, hi: number }
 
   // ---------------------------------------------------------------------------
   // Public: register a new signal/SNR reading from the SSE feed
-  // Called by app.js whenever a reading arrives for the active station.
   // ---------------------------------------------------------------------------
   function pushReading(reading) {
     if (!_open) return;
-    // Only update the FFT "actual" frequency marker when the reading is valid
-    // (invalid readings have no meaningful doppler_hz to plot on the FFT canvas).
     if (reading.valid) _lastReading = reading;
     const now    = Date.now();
     const cutoff = now - HISTORY_SECS * 1000;
-    // Always record signal/SNR — even when valid=false the backend still measures
-    // the noise floor, so the history panel shows the drop when signal is lost.
     histSignal.push({ t: now, v: reading.signal_dbfs });
     histSNR.push(   { t: now, v: reading.snr_db });
     while (histSignal.length > 0 && histSignal[0].t < cutoff) histSignal.shift();
@@ -101,14 +112,19 @@ const AudioAnalysisModal = (() => {
     if (_open) close();
     _label = label;
     _open  = true;
+    _mode  = 'audio'; // always start in audio mode
 
     // Clear history and zoom state
     histSignal.length = 0;
     histSNR.length    = 0;
     smoothMag         = null;
-    fftView           = null; // reset to full passband view
-    dbFloorSmooth     = null; // reset scale smoothing on open
+    smoothMagI        = null;
+    smoothMagQ        = null;
+    fftView           = null;
+    dbFloorSmooth     = null;
     dbCeilSmooth      = null;
+    dbFloorSmoothI    = null; dbCeilSmoothI = null;
+    dbFloorSmoothQ    = null; dbCeilSmoothQ = null;
     _lastReading      = null;
 
     // Show modal
@@ -119,17 +135,35 @@ const AudioAnalysisModal = (() => {
     setStatus('connecting', '⬤ Connecting…');
     document.getElementById('audio-fft-info').textContent        = '';
     document.getElementById('fft-carrier-label').textContent     = '—';
+    document.getElementById('iq-centre-label').textContent       = '—';
 
     fftCanvas  = document.getElementById('audio-fft-canvas');
+    iqICanvas  = document.getElementById('audio-iq-i-canvas');
+    iqQCanvas  = document.getElementById('audio-iq-q-canvas');
     histCanvas = document.getElementById('audio-history-canvas');
 
-    // Attach zoom/pan interaction to FFT canvas (idempotent — checks flag)
+    // Attach zoom/pan interaction to audio FFT canvas (idempotent)
     attachFFTInteraction(fftCanvas);
 
-    // Fetch audio info (sample rate, dial freq)
+    // Set initial mode UI
+    _applyModeUI();
+
+    // Wire up mode toggle buttons (idempotent via flag)
+    _attachModeButtons();
+
+    // Start audio stream (default mode)
+    await _startAudioStream();
+  }
+
+  // ---------------------------------------------------------------------------
+  // Start the audio (USB) stream
+  // ---------------------------------------------------------------------------
+  async function _startAudioStream() {
+    _teardownStream();
+
     try {
       const BASE = (window.BASE_PATH || '').replace(/\/$/, '');
-      const r    = await fetch(`${BASE}/api/audio/info?station=${encodeURIComponent(label)}`);
+      const r    = await fetch(`${BASE}/api/audio/info?station=${encodeURIComponent(_label)}`);
       if (!r.ok) throw new Error(await r.text());
       const info     = await r.json();
       _sampleRate    = info.sample_rate     || 12000;
@@ -148,91 +182,199 @@ const AudioAnalysisModal = (() => {
       return;
     }
 
-    // Create AudioContext (lazy — must be after a user gesture)
     try {
       _audioCtx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: _sampleRate });
     } catch (e) {
-      // Fall back to default sample rate if the requested one is unsupported
       _audioCtx = new (window.AudioContext || window.webkitAudioContext)();
     }
 
-    // AnalyserNode — Web Audio API does the FFT for us
-    _analyser                  = _audioCtx.createAnalyser();
-    _analyser.fftSize          = FFT_SIZE;
-    _analyser.smoothingTimeConstant = 0; // we do our own smoothing
-    _analyser.minDecibels      = -140;
-    _analyser.maxDecibels      = 0;
+    _analyser                       = _audioCtx.createAnalyser();
+    _analyser.fftSize               = FFT_SIZE;
+    _analyser.smoothingTimeConstant = 0;
+    _analyser.minDecibels           = -140;
+    _analyser.maxDecibels           = 0;
     _analyser.connect(_audioCtx.destination);
 
-    // Single <audio> element — one HTTP connection for both playback and FFT
-    const BASE    = (window.BASE_PATH || '').replace(/\/$/, '');
-    const audioUrl = `${BASE}/api/audio/preview?station=${encodeURIComponent(label)}`;
+    const BASE     = (window.BASE_PATH || '').replace(/\/$/, '');
+    const audioUrl = `${BASE}/api/audio/preview?station=${encodeURIComponent(_label)}`;
     _audioEl       = new Audio(audioUrl);
-    _audioEl.crossOrigin = 'anonymous'; // required for Web Audio API tap
+    _audioEl.crossOrigin = 'anonymous';
     _audioEl.preload     = 'none';
 
-    // Connect audio element → analyser → speakers
     _sourceNode = _audioCtx.createMediaElementSource(_audioEl);
     _sourceNode.connect(_analyser);
 
-    _audioEl.oncanplay = () => {
-      setStatus('live', '⬤ Live');
-    };
-    _audioEl.onerror = () => {
-      if (_open) setStatus('error', '⬤ Stream error');
-    };
-    _audioEl.onended = () => {
-      if (_open) close();
-    };
+    _audioEl.oncanplay = () => { if (_open && _mode === 'audio') setStatus('live', '⬤ Live'); };
+    _audioEl.onerror   = () => { if (_open) setStatus('error', '⬤ Stream error'); };
+    _audioEl.onended   = () => { if (_open) close(); };
 
     _audioEl.play().catch(e => {
       console.warn('audio play() failed:', e);
       setStatus('error', `⬤ Playback blocked: ${e.message}`);
     });
 
-    // Resume AudioContext if it was suspended (autoplay policy)
-    if (_audioCtx.state === 'suspended') {
-      _audioCtx.resume().catch(() => {});
-    }
+    if (_audioCtx.state === 'suspended') _audioCtx.resume().catch(() => {});
 
-    // Start render loop
-    _animFrame = requestAnimationFrame(renderLoop);
+    if (!_animFrame) _animFrame = requestAnimationFrame(renderLoop);
   }
 
   // ---------------------------------------------------------------------------
-  // Close the modal — stops playback and tears down Web Audio graph
+  // Start the IQ stream
   // ---------------------------------------------------------------------------
-  function close() {
-    _open  = false;
-    _label = null;
+  async function _startIQStream() {
+    _teardownStream();
 
-    // Stop audio element
+    try {
+      const BASE = (window.BASE_PATH || '').replace(/\/$/, '');
+      const r    = await fetch(`${BASE}/api/iq/info?station=${encodeURIComponent(_label)}`);
+      if (!r.ok) throw new Error(await r.text());
+      const info     = await r.json();
+      _sampleRate    = info.sample_rate    || 12000;
+      _carrierFreqHz = info.centre_freq_hz || 0;
+      _dialFreqHz    = _carrierFreqHz; // IQ is centred on the carrier
+
+      document.getElementById('audio-modal-subtitle').textContent =
+        `${fmtHzLocal(_carrierFreqHz)} centre · ${_sampleRate} Hz sample rate · ±${IQ_BW_HZ / 1000} kHz IQ`;
+      document.getElementById('iq-centre-label').textContent = fmtHzLocal(_carrierFreqHz);
+
+      const binHz = _sampleRate / FFT_SIZE;
+      document.getElementById('audio-fft-info').textContent =
+        `FFT: ${FFT_SIZE} pts · ${binHz.toFixed(3)} Hz/bin · ±${IQ_BW_HZ / 1000} kHz IQ window`;
+    } catch (e) {
+      setStatus('error', `⬤ Error: ${e.message}`);
+      return;
+    }
+
+    try {
+      // IQ stream is stereo (2 channels) — request matching sample rate
+      _audioCtx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: _sampleRate });
+    } catch (e) {
+      _audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    }
+
+    // Stereo splitter: channel 0 = I (left), channel 1 = Q (right)
+    _splitter = _audioCtx.createChannelSplitter(2);
+
+    _analyserI                       = _audioCtx.createAnalyser();
+    _analyserI.fftSize               = FFT_SIZE;
+    _analyserI.smoothingTimeConstant = 0;
+    _analyserI.minDecibels           = -140;
+    _analyserI.maxDecibels           = 0;
+
+    _analyserQ                       = _audioCtx.createAnalyser();
+    _analyserQ.fftSize               = FFT_SIZE;
+    _analyserQ.smoothingTimeConstant = 0;
+    _analyserQ.minDecibels           = -140;
+    _analyserQ.maxDecibels           = 0;
+
+    // Route: source → splitter → analyserI / analyserQ → destination (silent — IQ is not audio)
+    _splitter.connect(_analyserI, 0);
+    _splitter.connect(_analyserQ, 1);
+    // Do NOT connect analyserI/Q to destination — IQ is not meant to be heard
+
+    const BASE   = (window.BASE_PATH || '').replace(/\/$/, '');
+    const iqUrl  = `${BASE}/api/iq/stream?station=${encodeURIComponent(_label)}`;
+    _audioEl     = new Audio(iqUrl);
+    _audioEl.crossOrigin = 'anonymous';
+    _audioEl.preload     = 'none';
+    _audioEl.muted       = true; // IQ is not audio — mute playback
+
+    _sourceNode = _audioCtx.createMediaElementSource(_audioEl);
+    _sourceNode.connect(_splitter);
+
+    _audioEl.oncanplay = () => { if (_open && _mode === 'iq') setStatus('live', '⬤ Live'); };
+    _audioEl.onerror   = () => { if (_open) setStatus('error', '⬤ IQ stream error'); };
+    _audioEl.onended   = () => { if (_open) close(); };
+
+    _audioEl.play().catch(e => {
+      console.warn('iq play() failed:', e);
+      setStatus('error', `⬤ IQ stream blocked: ${e.message}`);
+    });
+
+    if (_audioCtx.state === 'suspended') _audioCtx.resume().catch(() => {});
+
+    if (!_animFrame) _animFrame = requestAnimationFrame(renderLoop);
+  }
+
+  // ---------------------------------------------------------------------------
+  // Tear down the current stream (audio element + Web Audio graph) without
+  // closing the modal or resetting history.
+  // ---------------------------------------------------------------------------
+  function _teardownStream() {
     if (_audioEl) {
       _audioEl.oncanplay = null;
       _audioEl.onerror   = null;
       _audioEl.onended   = null;
       _audioEl.pause();
       _audioEl.src = '';
-      _audioEl.load(); // abort the HTTP stream
+      _audioEl.load();
       _audioEl = null;
     }
+    if (_sourceNode)  { try { _sourceNode.disconnect(); }  catch (_) {} _sourceNode  = null; }
+    if (_splitter)    { try { _splitter.disconnect(); }    catch (_) {} _splitter    = null; }
+    if (_analyser)    { try { _analyser.disconnect(); }    catch (_) {} _analyser    = null; }
+    if (_analyserI)   { try { _analyserI.disconnect(); }   catch (_) {} _analyserI   = null; }
+    if (_analyserQ)   { try { _analyserQ.disconnect(); }   catch (_) {} _analyserQ   = null; }
+    if (_audioCtx)    { _audioCtx.close().catch(() => {}); _audioCtx = null; }
+    if (_animFrame)   { cancelAnimationFrame(_animFrame);  _animFrame = null; }
+    // Reset smoothing buffers so the new stream starts fresh
+    smoothMag  = null;
+    smoothMagI = null;
+    smoothMagQ = null;
+    dbFloorSmooth = null; dbCeilSmooth = null;
+    dbFloorSmoothI = null; dbCeilSmoothI = null;
+    dbFloorSmoothQ = null; dbCeilSmoothQ = null;
+  }
 
-    // Disconnect Web Audio graph
-    if (_sourceNode) {
-      try { _sourceNode.disconnect(); } catch (_) {}
-      _sourceNode = null;
+  // ---------------------------------------------------------------------------
+  // Switch between audio and IQ modes
+  // ---------------------------------------------------------------------------
+  async function _switchMode(newMode) {
+    if (newMode === _mode) return;
+    _mode = newMode;
+    _applyModeUI();
+    setStatus('connecting', '⬤ Connecting…');
+    if (newMode === 'iq') {
+      await _startIQStream();
+    } else {
+      await _startAudioStream();
     }
-    if (_analyser) {
-      try { _analyser.disconnect(); } catch (_) {}
-      _analyser = null;
-    }
-    if (_audioCtx) {
-      _audioCtx.close().catch(() => {});
-      _audioCtx = null;
-    }
+  }
 
-    // Cancel render loop
-    if (_animFrame) { cancelAnimationFrame(_animFrame); _animFrame = null; }
+  // Show/hide the correct FFT panels and update button active state.
+  function _applyModeUI() {
+    const audioPanel = document.getElementById('audio-fft-panel');
+    const iqPanel    = document.getElementById('iq-fft-panel');
+    const btnAudio   = document.getElementById('audio-mode-audio');
+    const btnIQ      = document.getElementById('audio-mode-iq');
+    if (audioPanel) audioPanel.style.display = _mode === 'audio' ? '' : 'none';
+    if (iqPanel)    iqPanel.style.display    = _mode === 'iq'    ? '' : 'none';
+    if (btnAudio) { btnAudio.classList.toggle('active', _mode === 'audio'); }
+    if (btnIQ)    { btnIQ.classList.toggle('active',    _mode === 'iq');    }
+  }
+
+  // Wire up mode toggle buttons — idempotent via a flag on the element.
+  function _attachModeButtons() {
+    const btnAudio = document.getElementById('audio-mode-audio');
+    const btnIQ    = document.getElementById('audio-mode-iq');
+    if (btnAudio && !btnAudio._modeListenerAttached) {
+      btnAudio._modeListenerAttached = true;
+      btnAudio.addEventListener('click', () => _switchMode('audio'));
+    }
+    if (btnIQ && !btnIQ._modeListenerAttached) {
+      btnIQ._modeListenerAttached = true;
+      btnIQ.addEventListener('click', () => _switchMode('iq'));
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Close the modal — stops playback and tears down everything
+  // ---------------------------------------------------------------------------
+  function close() {
+    _open  = false;
+    _label = null;
+
+    _teardownStream();
 
     // Hide modal
     const modal = document.getElementById('audio-modal');
@@ -250,22 +392,23 @@ const AudioAnalysisModal = (() => {
   // ---------------------------------------------------------------------------
   function renderLoop() {
     if (!_open) return;
-    drawFFT();
+    if (_mode === 'audio') {
+      drawFFT();
+    } else {
+      if (iqICanvas) drawIQFFT(iqICanvas, _analyserI, 'I', '#58a6ff', 'smoothMagI', 'I');
+      if (iqQCanvas) drawIQFFT(iqQCanvas, _analyserQ, 'Q', '#f0883e', 'smoothMagQ', 'Q');
+    }
     drawHistory();
     _animFrame = requestAnimationFrame(renderLoop);
   }
 
   // ---------------------------------------------------------------------------
-  // FFT canvas zoom/pan interaction
-  // Wheel: zoom towards cursor. Drag: pan. Double-click: reset.
-  // Prevents scroll events from reaching the page behind the modal.
+  // FFT canvas zoom/pan interaction (audio mode only)
   // ---------------------------------------------------------------------------
   function attachFFTInteraction(canvas) {
     if (canvas._fftInteractionAttached) return;
     canvas._fftInteractionAttached = true;
 
-    // Helper: get current full passband bin range (depends on _sampleRate which
-    // may not be set yet when this is called, so compute lazily inside handlers)
     function getFullRange() {
       const binHz  = (_sampleRate || 12000) / FFT_SIZE;
       const half   = FFT_SIZE / 2;
@@ -280,9 +423,8 @@ const AudioAnalysisModal = (() => {
       return fftView;
     }
 
-    // Mouse wheel → zoom towards cursor position
     canvas.addEventListener('wheel', e => {
-      e.preventDefault(); // stop page scroll
+      e.preventDefault();
       e.stopPropagation();
       const full   = getFullRange();
       const view   = getView();
@@ -292,17 +434,15 @@ const AudioAnalysisModal = (() => {
       const frac   = Math.max(0, Math.min(1, (e.clientX - rect.left - ML) / plotW));
       const span   = view.hi - view.lo;
       const curBin = view.lo + frac * span;
-      const factor = e.deltaY < 0 ? 0.6 : 1.667; // zoom in / out
+      const factor = e.deltaY < 0 ? 0.6 : 1.667;
       const newSpan = Math.max(5, Math.min(full.hi - full.lo, span * factor));
       let newLo = curBin - frac * newSpan;
       let newHi = newLo + newSpan;
-      // Clamp to full range
       if (newLo < full.lo) { newLo = full.lo; newHi = newLo + newSpan; }
       if (newHi > full.hi) { newHi = full.hi; newLo = newHi - newSpan; }
       fftView = { lo: newLo, hi: newHi };
     }, { passive: false });
 
-    // Click-drag → pan
     let dragStart = null;
     let dragViewLo = null;
     canvas.addEventListener('mousedown', e => {
@@ -325,13 +465,11 @@ const AudioAnalysisModal = (() => {
     const endDrag = () => { dragStart = null; dragViewLo = null; };
     canvas.addEventListener('mouseup', endDrag);
     canvas.addEventListener('mouseleave', endDrag);
-
-    // Double-click → reset to full passband
     canvas.addEventListener('dblclick', () => { fftView = null; });
   }
 
   // ---------------------------------------------------------------------------
-  // Draw FFT spectrum canvas
+  // Draw audio-mode FFT spectrum canvas
   // ---------------------------------------------------------------------------
   function drawFFT() {
     if (!fftCanvas || !_analyser) return;
@@ -355,12 +493,10 @@ const AudioAnalysisModal = (() => {
     ctx.fillStyle = '#0d1117';
     ctx.fillRect(0, 0, CW, CH);
 
-    // Read FFT data from AnalyserNode (float dB values)
-    const half = _analyser.frequencyBinCount; // = FFT_SIZE / 2
+    const half = _analyser.frequencyBinCount;
     const freqData = new Float32Array(half);
     _analyser.getFloatFrequencyData(freqData);
 
-    // Check if we have real data yet (all -Infinity means no audio yet)
     let hasData = false;
     for (let i = 1; i < half; i++) {
       if (isFinite(freqData[i]) && freqData[i] > -140) { hasData = true; break; }
@@ -373,7 +509,6 @@ const AudioAnalysisModal = (() => {
       return;
     }
 
-    // Smooth
     if (!smoothMag || smoothMag.length !== half) {
       smoothMag = new Float32Array(freqData);
     } else {
@@ -384,26 +519,18 @@ const AudioAnalysisModal = (() => {
       }
     }
 
-    // Determine visible bin range: use zoom view if set, else full passband.
-    // AnalyserNode bin i → audio freq = i * sampleRate / FFT_SIZE
-    // Real-world freq = dialFreqHz + audio_freq
     const binHz      = _sampleRate / FFT_SIZE;
     const pbLo       = Math.max(1, Math.floor(PASSBAND_LOW  / binHz));
     const pbHi       = Math.min(half - 1, Math.ceil(PASSBAND_HIGH / binHz));
     const binLow     = fftView ? Math.max(pbLo, Math.round(fftView.lo)) : pbLo;
     const binHigh    = fftView ? Math.min(pbHi, Math.round(fftView.hi)) : pbHi;
-    const freqStart  = _dialFreqHz + binLow  * binHz;  // real-world Hz at left edge
-    const freqEnd    = _dialFreqHz + binHigh * binHz;  // real-world Hz at right edge
+    const freqStart  = _dialFreqHz + binLow  * binHz;
+    const freqEnd    = _dialFreqHz + binHigh * binHz;
     const freqSpan   = freqEnd - freqStart || 1;
     const numBins    = binHigh - binLow + 1;
 
-    // Helper: bin index → X pixel within [ML, ML+plotW]
     const binToX = i => ML + ((i - binLow) / (numBins - 1)) * plotW;
 
-    // dB range over passband bins:
-    // - Median (p50) of all bins → robust noise floor estimate (ignores outliers)
-    // - Absolute max → ensures the carrier peak always sets the ceiling
-    // - Enforce a minimum 40 dB span so the scale never collapses when SNR is low
     let noiseFloorDB = -100, peakDB = -40;
     {
       const vals = [];
@@ -412,32 +539,25 @@ const AudioAnalysisModal = (() => {
       }
       if (vals.length > 0) {
         vals.sort((a, b) => a - b);
-        noiseFloorDB = vals[Math.floor(vals.length * 0.50)]; // median
-        peakDB       = vals[vals.length - 1];                // absolute max
+        noiseFloorDB = vals[Math.floor(vals.length * 0.50)];
+        peakDB       = vals[vals.length - 1];
       }
     }
-    // Enforce minimum span
     if (peakDB - noiseFloorDB < 40) peakDB = noiseFloorDB + 40;
 
-    // Bootstrap smoothed bounds on first valid frame
     if (dbFloorSmooth === null) { dbFloorSmooth = noiseFloorDB; dbCeilSmooth = peakDB; }
-
-    // Noise floor: slow tracking in both directions (stable baseline)
     dbFloorSmooth = dbFloorSmooth * (1 - SCALE_SHRINK_ALPHA) + noiseFloorDB * SCALE_SHRINK_ALPHA;
-    // Peak ceiling: snap up fast when signal appears, decay slowly when it fades
     if (peakDB > dbCeilSmooth) {
       dbCeilSmooth = dbCeilSmooth * (1 - SCALE_EXPAND_ALPHA) + peakDB * SCALE_EXPAND_ALPHA;
     } else {
       dbCeilSmooth = dbCeilSmooth * (1 - SCALE_SHRINK_ALPHA) + peakDB * SCALE_SHRINK_ALPHA;
     }
 
-    // Axis bounds: noise floor pushed well below the median; minimal headroom above peak.
     const dbFloor = Math.floor(dbFloorSmooth / 10) * 10 - 20;
     const dbCeil  = Math.ceil(dbCeilSmooth   / 10) * 10 + 5;
     const dbRange = dbCeil - dbFloor || 10;
     const dbToY   = db => plotH - ((db - dbFloor) / dbRange) * plotH;
 
-    // Draw spectrum bars (passband only)
     ctx.fillStyle = '#58a6ff88';
     const barW = Math.max(1, plotW / numBins);
     for (let i = binLow; i <= binHigh; i++) {
@@ -462,15 +582,13 @@ const AudioAnalysisModal = (() => {
       ctx.setLineDash([]);
     }
 
-    // X axis — real-world frequency labels across the passband (in kHz)
+    // X axis
     const rawStep   = freqSpan / 6;
     const mag10     = Math.pow(10, Math.floor(Math.log10(Math.abs(rawStep) || 1)));
     const niceSteps = [1, 2, 5, 10, 20, 50, 100, 200, 500, 1000, 2000, 5000];
     let freqStep    = (niceSteps.find(v => v * mag10 >= rawStep) || 100) * mag10;
     if (freqStep < 1) freqStep = 1;
 
-    // Determine kHz decimal places based on step size:
-    // step >= 1000 Hz → 0 dp, step >= 100 Hz → 1 dp, step >= 10 Hz → 2 dp, else 3 dp
     const khzDecimals = freqStep >= 1000 ? 0 : freqStep >= 100 ? 1 : freqStep >= 10 ? 2 : 3;
 
     ctx.font = '9px sans-serif';
@@ -491,7 +609,7 @@ const AudioAnalysisModal = (() => {
     ctx.fillStyle = '#555';
     ctx.fillText('kHz', CW - 2, CH - 3);
 
-    // Expected carrier (green dashed) — nominal carrier frequency with no Doppler
+    // Expected carrier (green dashed)
     if (_showExpected && _carrierFreqHz >= freqStart && _carrierFreqHz <= freqEnd) {
       const cx = ML + ((_carrierFreqHz - freqStart) / freqSpan) * plotW;
       ctx.strokeStyle = '#3fb950';
@@ -505,7 +623,7 @@ const AudioAnalysisModal = (() => {
       ctx.fillText('expected', cx + (ctx.textAlign === 'left' ? 3 : -3), 10);
     }
 
-    // Actual detected frequency (red solid) — carrier shifted by measured Doppler
+    // Actual detected frequency (red solid)
     if (_showActual && _lastReading && _lastReading.valid) {
       const dHz = (_lastReading.corrected_doppler_hz !== null && _lastReading.corrected_doppler_hz !== undefined)
         ? _lastReading.corrected_doppler_hz
@@ -532,9 +650,202 @@ const AudioAnalysisModal = (() => {
   }
 
   // ---------------------------------------------------------------------------
+  // Draw one IQ channel FFT canvas (I or Q)
+  // analyser  — the AnalyserNode for this channel
+  // smoothKey — 'smoothMagI' or 'smoothMagQ' (string key into closure vars)
+  // floorKey  — 'I' or 'Q' (used to pick the right smoothed scale vars)
+  // barColour — CSS colour string for the spectrum bars
+  // ---------------------------------------------------------------------------
+  function drawIQFFT(canvas, analyser, channelLabel, barColour, smoothKey, scaleKey) {
+    if (!canvas || !analyser) return;
+
+    // Pick the right smoothing buffer and scale vars by channel
+    let smoothBuf   = scaleKey === 'I' ? smoothMagI   : smoothMagQ;
+    let floorSmooth = scaleKey === 'I' ? dbFloorSmoothI : dbFloorSmoothQ;
+    let ceilSmooth  = scaleKey === 'I' ? dbCeilSmoothI  : dbCeilSmoothQ;
+
+    const dpr  = window.devicePixelRatio || 1;
+    const cssW = canvas.clientWidth  || 760;
+    const cssH = canvas.clientHeight || 140;
+    const W    = Math.round(cssW * dpr);
+    const H    = Math.round(cssH * dpr);
+    if (canvas.width !== W || canvas.height !== H) {
+      canvas.width = W; canvas.height = H;
+    }
+    const ctx = canvas.getContext('2d');
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    const CW = cssW, CH = cssH;
+
+    const ML = 46, MB = 20;
+    const plotW = CW - ML, plotH = CH - MB;
+
+    ctx.clearRect(0, 0, CW, CH);
+    ctx.fillStyle = '#0d1117';
+    ctx.fillRect(0, 0, CW, CH);
+
+    const half = analyser.frequencyBinCount; // FFT_SIZE / 2
+    const freqData = new Float32Array(half);
+    analyser.getFloatFrequencyData(freqData);
+
+    // Check for real data
+    let hasData = false;
+    for (let i = 1; i < half; i++) {
+      if (isFinite(freqData[i]) && freqData[i] > -140) { hasData = true; break; }
+    }
+    if (!hasData) {
+      ctx.fillStyle = '#8b949e';
+      ctx.font = '11px sans-serif';
+      ctx.textAlign = 'center';
+      ctx.fillText(`Buffering IQ (${channelLabel})…`, ML + plotW / 2, CH / 2);
+      return;
+    }
+
+    // Smooth
+    if (!smoothBuf || smoothBuf.length !== half) {
+      smoothBuf = new Float32Array(freqData);
+    } else {
+      for (let i = 0; i < half; i++) {
+        if (isFinite(freqData[i])) {
+          smoothBuf[i] = smoothBuf[i] * (1 - SMOOTH_ALPHA) + freqData[i] * SMOOTH_ALPHA;
+        }
+      }
+    }
+    // Write back to closure variable
+    if (scaleKey === 'I') smoothMagI = smoothBuf; else smoothMagQ = smoothBuf;
+
+    // IQ view: the Web Audio API gives us bins 0…half-1 where bin i = i * sr / FFT_SIZE Hz
+    // (audio-relative). For IQ centred on the carrier, audio freq 0 = carrier,
+    // and the ±IQ_BW_HZ window maps to bins 0…(IQ_BW_HZ / binHz).
+    // We show the full ±IQ_BW_HZ window: bins 0 to bwBin.
+    const binHz  = _sampleRate / FFT_SIZE;
+    const bwBin  = Math.min(half - 1, Math.round(IQ_BW_HZ / binHz));
+    const binLow = 0;
+    const binHigh = bwBin;
+    const numBins = binHigh - binLow + 1;
+
+    // Real-world frequency axis: bin 0 = carrier, bin bwBin = carrier + IQ_BW_HZ
+    // We display as offset from carrier (−IQ_BW_HZ … +IQ_BW_HZ) by mirroring:
+    // For a real IQ stream the negative frequencies are in the upper half of the
+    // stereo WAV (Web Audio only gives us 0…Nyquist), so we just show 0…+IQ_BW_HZ
+    // labelled as offset from carrier.
+    const freqStart = _carrierFreqHz;
+    const freqEnd   = _carrierFreqHz + IQ_BW_HZ;
+    const freqSpan  = IQ_BW_HZ || 1;
+
+    const binToX = i => ML + ((i - binLow) / (numBins - 1)) * plotW;
+
+    // dB range
+    let noiseFloorDB = -100, peakDB = -40;
+    {
+      const vals = [];
+      for (let i = binLow; i <= binHigh; i++) {
+        if (isFinite(smoothBuf[i])) vals.push(smoothBuf[i]);
+      }
+      if (vals.length > 0) {
+        vals.sort((a, b) => a - b);
+        noiseFloorDB = vals[Math.floor(vals.length * 0.50)];
+        peakDB       = vals[vals.length - 1];
+      }
+    }
+    if (peakDB - noiseFloorDB < 40) peakDB = noiseFloorDB + 40;
+
+    if (floorSmooth === null) { floorSmooth = noiseFloorDB; ceilSmooth = peakDB; }
+    floorSmooth = floorSmooth * (1 - SCALE_SHRINK_ALPHA) + noiseFloorDB * SCALE_SHRINK_ALPHA;
+    if (peakDB > ceilSmooth) {
+      ceilSmooth = ceilSmooth * (1 - SCALE_EXPAND_ALPHA) + peakDB * SCALE_EXPAND_ALPHA;
+    } else {
+      ceilSmooth = ceilSmooth * (1 - SCALE_SHRINK_ALPHA) + peakDB * SCALE_SHRINK_ALPHA;
+    }
+    // Write back scale vars
+    if (scaleKey === 'I') { dbFloorSmoothI = floorSmooth; dbCeilSmoothI = ceilSmooth; }
+    else                  { dbFloorSmoothQ = floorSmooth; dbCeilSmoothQ = ceilSmooth; }
+
+    const dbFloor = Math.floor(floorSmooth / 10) * 10 - 20;
+    const dbCeil  = Math.ceil(ceilSmooth   / 10) * 10 + 5;
+    const dbRange = dbCeil - dbFloor || 10;
+    const dbToY   = db => plotH - ((db - dbFloor) / dbRange) * plotH;
+
+    // Spectrum bars
+    const colour88 = barColour + '88';
+    ctx.fillStyle = colour88;
+    const barW = Math.max(1, plotW / numBins);
+    for (let i = binLow; i <= binHigh; i++) {
+      const x = binToX(i);
+      const y = dbToY(isFinite(smoothBuf[i]) ? smoothBuf[i] : dbFloor);
+      ctx.fillRect(x, y, barW, plotH - y);
+    }
+
+    // Y axis
+    ctx.font = '9px sans-serif';
+    ctx.textAlign = 'right';
+    const dbStep = dbRange <= 20 ? 5 : dbRange <= 40 ? 10 : 20;
+    for (let db = dbFloor; db <= dbCeil; db += dbStep) {
+      const y = dbToY(db);
+      if (y < 0 || y > plotH) continue;
+      ctx.fillStyle = '#8b949e';
+      ctx.fillText(db + ' dB', ML - 3, y + 3);
+      ctx.strokeStyle = '#21262d';
+      ctx.lineWidth = 1;
+      ctx.setLineDash([2, 2]);
+      ctx.beginPath(); ctx.moveTo(ML, y); ctx.lineTo(CW, y); ctx.stroke();
+      ctx.setLineDash([]);
+    }
+
+    // X axis — real-world frequency labels
+    const rawStep   = freqSpan / 6;
+    const mag10     = Math.pow(10, Math.floor(Math.log10(Math.abs(rawStep) || 1)));
+    const niceSteps = [1, 2, 5, 10, 20, 50, 100, 200, 500, 1000, 2000, 5000];
+    let freqStep    = (niceSteps.find(v => v * mag10 >= rawStep) || 100) * mag10;
+    if (freqStep < 1) freqStep = 1;
+    const khzDecimals = freqStep >= 1000 ? 0 : freqStep >= 100 ? 1 : freqStep >= 10 ? 2 : 3;
+
+    ctx.font = '9px sans-serif';
+    ctx.textAlign = 'center';
+    const firstLabel = Math.ceil(freqStart / freqStep) * freqStep;
+    for (let f = firstLabel; f <= freqEnd; f += freqStep) {
+      const x = ML + ((f - freqStart) / freqSpan) * plotW;
+      if (x < ML || x > CW) continue;
+      ctx.fillStyle = '#8b949e';
+      ctx.fillText((f / 1000).toFixed(khzDecimals), x, CH - 3);
+      ctx.strokeStyle = '#21262d';
+      ctx.lineWidth = 1;
+      ctx.setLineDash([2, 2]);
+      ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, plotH); ctx.stroke();
+      ctx.setLineDash([]);
+    }
+    ctx.textAlign = 'right';
+    ctx.fillStyle = '#555';
+    ctx.fillText('kHz', CW - 2, CH - 3);
+
+    // Carrier marker (green dashed) — at bin 0 = carrier frequency
+    {
+      const cx = ML; // bin 0 = left edge = carrier
+      ctx.strokeStyle = '#3fb950';
+      ctx.lineWidth = 1.5;
+      ctx.setLineDash([4, 3]);
+      ctx.beginPath(); ctx.moveTo(cx, 0); ctx.lineTo(cx, plotH); ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.fillStyle = '#3fb950';
+      ctx.font = '9px sans-serif';
+      ctx.textAlign = 'left';
+      ctx.fillText('carrier', cx + 3, 10);
+    }
+
+    // Channel label (top-right)
+    ctx.fillStyle = barColour;
+    ctx.font = 'bold 10px sans-serif';
+    ctx.textAlign = 'right';
+    ctx.fillText(channelLabel, CW - 4, 12);
+
+    // Axis border
+    ctx.strokeStyle = '#30363d';
+    ctx.lineWidth = 1;
+    ctx.setLineDash([]);
+    ctx.strokeRect(ML, 0, plotW, plotH);
+  }
+
+  // ---------------------------------------------------------------------------
   // Draw 60-second history canvas
-  // Dual-axis layout: signal (dBFS) on left axis, SNR (dB) on right axis.
-  // Both series share the full plot height for maximum readability.
   // ---------------------------------------------------------------------------
   function drawHistory() {
     if (!histCanvas) return;
@@ -551,7 +862,6 @@ const AudioAnalysisModal = (() => {
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     const CW = cssW, CH = cssH;
 
-    // Left margin for signal axis, right margin for SNR axis, bottom for time
     const ML = 46, MR = 46, MB = 18;
     const plotW = CW - ML - MR;
     const plotH = CH - MB;
@@ -577,7 +887,6 @@ const AudioAnalysisModal = (() => {
       return;
     }
 
-    // Compute ranges — enforce a minimum 10 dB span so the line is never flat
     const MIN_SPAN = 10;
     let sigMin = Infinity, sigMax = -Infinity;
     let snrMin = Infinity, snrMax = -Infinity;
@@ -598,7 +907,7 @@ const AudioAnalysisModal = (() => {
     const snrRange = snrCeil - snrFloor || MIN_SPAN;
     const snrToY   = v => plotH - ((v - snrFloor) / snrRange) * plotH;
 
-    // ── Left Y axis: signal power (dBFS) — blue ──────────────────────────────
+    // Left Y axis: signal power (dBFS) — blue
     ctx.font = '9px sans-serif';
     const sigStep = sigRange <= 20 ? 5 : 10;
     for (let v = sigFloor; v <= sigCeil; v += sigStep) {
@@ -613,7 +922,6 @@ const AudioAnalysisModal = (() => {
       ctx.beginPath(); ctx.moveTo(ML, y); ctx.lineTo(ML + plotW, y); ctx.stroke();
       ctx.setLineDash([]);
     }
-    // Left axis label
     ctx.save();
     ctx.fillStyle = '#58a6ff';
     ctx.font = '8px sans-serif';
@@ -621,7 +929,7 @@ const AudioAnalysisModal = (() => {
     ctx.fillText('dBFS', ML - 3, 9);
     ctx.restore();
 
-    // ── Right Y axis: SNR (dB) — green ───────────────────────────────────────
+    // Right Y axis: SNR (dB) — green
     const snrStep = snrRange <= 20 ? 5 : 10;
     for (let v = snrFloor; v <= snrCeil; v += snrStep) {
       const y = snrToY(v);
@@ -630,10 +938,7 @@ const AudioAnalysisModal = (() => {
       ctx.font = '9px sans-serif';
       ctx.textAlign = 'left';
       ctx.fillText(v, ML + plotW + 3, y + 3);
-      // Only draw grid lines for SNR ticks that don't already have a signal tick nearby
-      // (avoid double grid lines cluttering the plot)
     }
-    // Right axis label
     ctx.save();
     ctx.fillStyle = '#3fb950';
     ctx.font = '8px sans-serif';
@@ -641,7 +946,7 @@ const AudioAnalysisModal = (() => {
     ctx.fillText('SNR dB', ML + plotW + 3, 9);
     ctx.restore();
 
-    // ── Signal power line (blue) ──────────────────────────────────────────────
+    // Signal power line (blue)
     ctx.strokeStyle = '#58a6ff';
     ctx.lineWidth = 1.5;
     ctx.beginPath();
@@ -654,7 +959,7 @@ const AudioAnalysisModal = (() => {
     }
     ctx.stroke();
 
-    // ── SNR line (green) ──────────────────────────────────────────────────────
+    // SNR line (green)
     ctx.strokeStyle = '#3fb950';
     ctx.lineWidth = 1.5;
     ctx.beginPath();
@@ -667,10 +972,8 @@ const AudioAnalysisModal = (() => {
     }
     ctx.stroke();
 
-    // Time axis
     drawTimeAxis(ctx, ML, plotW, plotH, CH);
 
-    // Axis border
     ctx.strokeStyle = '#30363d';
     ctx.lineWidth = 1;
     ctx.setLineDash([]);
@@ -699,7 +1002,7 @@ const AudioAnalysisModal = (() => {
   function setStatus(type, text) {
     const el = document.getElementById('audio-status-text');
     if (!el) return;
-    el.className  = 'audio-status-' + type;
+    el.className   = 'audio-status-' + type;
     el.textContent = text;
   }
 
