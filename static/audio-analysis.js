@@ -10,8 +10,7 @@
  *
  *   IQ mode:
  *     • Connects to /api/iq/stream (stereo WAV, I=left Q=right, ±6 kHz)
- *     • Single FFT canvas showing the full complex spectrum ±6 kHz
- *       centred on the carrier frequency
+ *     • Single complex-spectrum canvas showing ±6 kHz centred on carrier
  *     • Uses a JS complex FFT (Cooley-Tukey) on time-domain I+Q samples
  *       so negative frequencies are correctly shown on the left
  *
@@ -72,16 +71,12 @@ const AudioAnalysisModal = (() => {
 
   // Canvas refs
   let fftCanvas     = null;   // audio mode FFT
-  let iqCanvas      = null;   // IQ mode — combined complex spectrum
-  let iqICanvas     = null;   // IQ mode — I channel (positive sideband)
-  let iqQCanvas     = null;   // IQ mode — Q channel (positive sideband)
+  let iqCanvas      = null;   // IQ mode — complex spectrum
   let histCanvas    = null;
 
   // Smoothed FFT magnitude buffers
   let smoothMag     = null;   // audio mode (from AnalyserNode.getFloatFrequencyData)
   let smoothMagIQ   = null;   // IQ mode — complex FFT magnitude (centred)
-  let smoothMagI    = null;   // IQ mode — I channel one-sided FFT
-  let smoothMagQ    = null;   // IQ mode — Q channel one-sided FFT
   const SMOOTH_ALPHA = 0.3;   // blend factor for new frame (higher = more responsive)
 
   // Smoothed Y-axis scale bounds — updated slowly so the axis doesn't jump every frame.
@@ -89,8 +84,6 @@ const AudioAnalysisModal = (() => {
   let dbCeilSmooth    = null;
   let dbFloorSmoothIQ = null;
   let dbCeilSmoothIQ  = null;
-  let dbFloorSmoothI  = null; let dbCeilSmoothI = null;
-  let dbFloorSmoothQ  = null; let dbCeilSmoothQ = null;
   const SCALE_EXPAND_ALPHA  = 0.15;
   const SCALE_SHRINK_ALPHA  = 0.005;
 
@@ -98,8 +91,6 @@ const AudioAnalysisModal = (() => {
   let fftView   = null; // { lo: number, hi: number }
   // IQ complex-FFT zoom/pan state (complex bin space 0…N−1, N=4096)
   let iqView    = null; // { lo: number, hi: number }
-  // IQ channel zoom/pan state (one-sided bin space 0…bwBin) — shared by I and Q canvases
-  let iqChView  = null; // { lo: number, hi: number }
 
   // ---------------------------------------------------------------------------
   // Public: register a new signal/SNR reading from the SSE feed
@@ -129,17 +120,12 @@ const AudioAnalysisModal = (() => {
     histSNR.length    = 0;
     smoothMag         = null;
     smoothMagIQ       = null;
-    smoothMagI        = null;
-    smoothMagQ        = null;
     fftView           = null;
     iqView            = null;
-    iqChView          = null;
     dbFloorSmooth     = null;
     dbCeilSmooth      = null;
     dbFloorSmoothIQ   = null;
     dbCeilSmoothIQ    = null;
-    dbFloorSmoothI    = null; dbCeilSmoothI = null;
-    dbFloorSmoothQ    = null; dbCeilSmoothQ = null;
     _lastReading      = null;
 
     // Show modal
@@ -154,17 +140,12 @@ const AudioAnalysisModal = (() => {
 
     fftCanvas  = document.getElementById('audio-fft-canvas');
     iqCanvas   = document.getElementById('audio-iq-canvas');
-    iqICanvas  = document.getElementById('audio-iq-i-canvas');
-    iqQCanvas  = document.getElementById('audio-iq-q-canvas');
     histCanvas = document.getElementById('audio-history-canvas');
 
     // Attach zoom/pan interaction to audio FFT canvas (idempotent)
     attachFFTInteraction(fftCanvas);
     // Attach zoom/pan interaction to complex IQ canvas (idempotent)
     attachIQInteraction(iqCanvas);
-    // Attach zoom/pan interaction to I/Q channel canvases (idempotent, own view)
-    attachIQChInteraction(iqICanvas);
-    attachIQChInteraction(iqQCanvas);
 
     // Reset resample dropdown to native
     const resampleSel = document.getElementById('audio-resample-select');
@@ -375,12 +356,8 @@ const AudioAnalysisModal = (() => {
     // Reset smoothing buffers so the new stream starts fresh
     smoothMag   = null;
     smoothMagIQ = null;
-    smoothMagI  = null;
-    smoothMagQ  = null;
     dbFloorSmooth   = null; dbCeilSmooth   = null;
     dbFloorSmoothIQ = null; dbCeilSmoothIQ = null;
-    dbFloorSmoothI  = null; dbCeilSmoothI  = null;
-    dbFloorSmoothQ  = null; dbCeilSmoothQ  = null;
   }
 
   // ---------------------------------------------------------------------------
@@ -470,9 +447,7 @@ const AudioAnalysisModal = (() => {
     if (_mode === 'audio') {
       drawFFT();
     } else {
-      if (iqCanvas)  drawComplexIQFFT(iqCanvas);
-      if (iqICanvas) drawIQChannelFFT(iqICanvas, _analyserI, 'I', '#58a6ff');
-      if (iqQCanvas) drawIQChannelFFT(iqQCanvas, _analyserQ, 'Q', '#f0883e');
+      if (iqCanvas) drawComplexIQFFT(iqCanvas);
     }
     drawHistory();
     _animFrame = requestAnimationFrame(renderLoop);
@@ -552,8 +527,12 @@ const AudioAnalysisModal = (() => {
     if (!canvas || canvas._iqInteractionAttached) return;
     canvas._iqInteractionAttached = true;
 
+    // Must match drawComplexIQFFT: N=4096, fullLo = N/2 - bwBins, fullHi = N/2 + bwBins
     function getFullRange() {
-      return { lo: 0, hi: FFT_SIZE - 1 };
+      const N = 4096;
+      const binHz  = (_sampleRate || 12000) / N;
+      const bwBins = Math.round(IQ_BW_HZ / binHz);
+      return { lo: N / 2 - bwBins, hi: N / 2 + bwBins };
     }
 
     function getView() {
@@ -604,64 +583,6 @@ const AudioAnalysisModal = (() => {
     canvas.addEventListener('mouseup', endDrag);
     canvas.addEventListener('mouseleave', endDrag);
     canvas.addEventListener('dblclick', () => { iqView = null; });
-  }
-
-  // ---------------------------------------------------------------------------
-  // I/Q channel canvas zoom/pan — uses iqChView (one-sided bin space 0…bwBin)
-  // Shared by both iqICanvas and iqQCanvas.
-  // ---------------------------------------------------------------------------
-  function attachIQChInteraction(canvas) {
-    if (!canvas || canvas._iqChInteractionAttached) return;
-    canvas._iqChInteractionAttached = true;
-
-    function getFullRange() {
-      const binHz = (_sampleRate || 12000) / FFT_SIZE;
-      const half  = FFT_SIZE / 2;
-      return { lo: 0, hi: Math.min(half - 1, Math.round(IQ_BW_HZ / binHz)) };
-    }
-    function getView() {
-      if (!iqChView) iqChView = getFullRange();
-      return iqChView;
-    }
-
-    canvas.addEventListener('wheel', e => {
-      e.preventDefault();
-      e.stopPropagation();
-      const full   = getFullRange();
-      const view   = getView();
-      const ML     = 46;
-      const plotW  = canvas.clientWidth - ML;
-      const rect   = canvas.getBoundingClientRect();
-      const frac   = Math.max(0, Math.min(1, (e.clientX - rect.left - ML) / plotW));
-      const span   = view.hi - view.lo;
-      const curBin = view.lo + frac * span;
-      const factor = e.deltaY < 0 ? 0.6 : 1.667;
-      const newSpan = Math.max(5, Math.min(full.hi - full.lo, span * factor));
-      let newLo = curBin - frac * newSpan;
-      let newHi = newLo + newSpan;
-      if (newLo < full.lo) { newLo = full.lo; newHi = newLo + newSpan; }
-      if (newHi > full.hi) { newHi = full.hi; newLo = newHi - newSpan; }
-      iqChView = { lo: newLo, hi: newHi };
-    }, { passive: false });
-
-    let dragStart = null, dragViewLo = null;
-    canvas.addEventListener('mousedown', e => { dragStart = e.clientX; dragViewLo = getView().lo; });
-    canvas.addEventListener('mousemove', e => {
-      if (dragStart === null) return;
-      const view  = getView();
-      const ML    = 46;
-      const plotW = canvas.clientWidth - ML;
-      const span  = view.hi - view.lo;
-      const binsPerPx = span / plotW;
-      const full  = getFullRange();
-      let newLo   = dragViewLo - (e.clientX - dragStart) * binsPerPx;
-      newLo = Math.max(full.lo, Math.min(full.hi - span, newLo));
-      iqChView = { lo: newLo, hi: newLo + span };
-    });
-    const endDragCh = () => { dragStart = null; dragViewLo = null; };
-    canvas.addEventListener('mouseup', endDragCh);
-    canvas.addEventListener('mouseleave', endDragCh);
-    canvas.addEventListener('dblclick', () => { iqChView = null; });
   }
 
   // ---------------------------------------------------------------------------
@@ -974,11 +895,11 @@ const AudioAnalysisModal = (() => {
     const fullLo  = half - bwBins;
     const fullHi  = half + bwBins;
 
-    // Apply iqView zoom/pan
+    // Apply iqView zoom/pan — clamp to the signal window (fullLo…fullHi)
     if (!iqView) iqView = { lo: fullLo, hi: fullHi };
-    const binLow  = Math.max(0,   Math.round(iqView.lo));
-    const binHigh = Math.min(N-1, Math.round(iqView.hi));
-    const numBins = binHigh - binLow + 1;
+    const binLow  = Math.max(fullLo, Math.min(fullHi, Math.round(iqView.lo)));
+    const binHigh = Math.max(binLow, Math.min(fullHi, Math.round(iqView.hi)));
+    const numBins = Math.max(2, binHigh - binLow + 1);
 
     // Offset from carrier: bin i → (i − N/2) * binHz
     const offsetStart = (binLow  - half) * binHz;
@@ -1085,166 +1006,6 @@ const AudioAnalysisModal = (() => {
         ctx.fillText(fmtHzLocal(_carrierFreqHz), carrierX + 3, 10);
       }
     }
-
-    // Axis border
-    ctx.strokeStyle = '#30363d';
-    ctx.lineWidth = 1;
-    ctx.setLineDash([]);
-    ctx.strokeRect(ML, 0, plotW, plotH);
-  }
-
-  // ---------------------------------------------------------------------------
-  // Draw one IQ channel's one-sided FFT (I or Q) using AnalyserNode frequency data.
-  // Shows the positive sideband (0 … +IQ_BW_HZ) with absolute frequency labels.
-  // Shares iqView zoom/pan with the complex FFT canvas.
-  // ---------------------------------------------------------------------------
-  function drawIQChannelFFT(canvas, analyser, channelLabel, barColour) {
-    if (!canvas || !analyser) return;
-
-    const dpr  = window.devicePixelRatio || 1;
-    const cssW = canvas.clientWidth  || 760;
-    const cssH = canvas.clientHeight || 90;
-    const W    = Math.round(cssW * dpr);
-    const H    = Math.round(cssH * dpr);
-    if (canvas.width !== W || canvas.height !== H) {
-      canvas.width = W; canvas.height = H;
-    }
-    const ctx = canvas.getContext('2d');
-    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-    const CW = cssW, CH = cssH;
-    const ML = 46, MB = 18;
-    const plotW = CW - ML, plotH = CH - MB;
-
-    ctx.clearRect(0, 0, CW, CH);
-    ctx.fillStyle = '#0d1117';
-    ctx.fillRect(0, 0, CW, CH);
-
-    const half = analyser.frequencyBinCount; // FFT_SIZE / 2
-    const freqData = new Float32Array(half);
-    analyser.getFloatFrequencyData(freqData);
-
-    // Check for real data
-    let hasData = false;
-    for (let i = 1; i < half; i++) {
-      if (isFinite(freqData[i]) && freqData[i] > -140) { hasData = true; break; }
-    }
-    if (!hasData) {
-      ctx.fillStyle = '#8b949e';
-      ctx.font = '10px sans-serif';
-      ctx.textAlign = 'center';
-      ctx.fillText(`Buffering ${channelLabel}…`, ML + plotW / 2, CH / 2);
-      return;
-    }
-
-    // Smooth
-    let smoothBuf   = channelLabel === 'I' ? smoothMagI : smoothMagQ;
-    let floorSmooth = channelLabel === 'I' ? dbFloorSmoothI : dbFloorSmoothQ;
-    let ceilSmooth  = channelLabel === 'I' ? dbCeilSmoothI  : dbCeilSmoothQ;
-
-    if (!smoothBuf || smoothBuf.length !== half) {
-      smoothBuf = new Float32Array(freqData);
-    } else {
-      for (let i = 0; i < half; i++) {
-        if (isFinite(freqData[i])) {
-          smoothBuf[i] = smoothBuf[i] * (1 - SMOOTH_ALPHA) + freqData[i] * SMOOTH_ALPHA;
-        }
-      }
-    }
-    if (channelLabel === 'I') { smoothMagI = smoothBuf; } else { smoothMagQ = smoothBuf; }
-
-    // Bin range: 0 … bwBin (positive sideband only)
-    const binHz  = _sampleRate / FFT_SIZE;
-    const bwBin  = Math.min(half - 1, Math.round(IQ_BW_HZ / binHz));
-
-    // Use iqChView for zoom/pan (one-sided bin space, independent of complex FFT view)
-    const fullLo = 0, fullHi = bwBin;
-    if (!iqChView) iqChView = { lo: fullLo, hi: fullHi };
-    const binLow  = Math.max(fullLo, Math.round(iqChView.lo));
-    const binHigh = Math.min(fullHi, Math.round(iqChView.hi));
-    const numBins = Math.max(1, binHigh - binLow + 1);
-
-    const binToX = i => ML + ((i - binLow) / Math.max(1, numBins - 1)) * plotW;
-
-    // dB range
-    let noiseFloorDB = -100, peakDB = -40;
-    {
-      const vals = [];
-      for (let i = binLow; i <= binHigh; i++) {
-        if (isFinite(smoothBuf[i])) vals.push(smoothBuf[i]);
-      }
-      if (vals.length > 0) {
-        vals.sort((a, b) => a - b);
-        noiseFloorDB = vals[Math.floor(vals.length * 0.50)];
-        peakDB       = vals[vals.length - 1];
-      }
-    }
-    if (peakDB - noiseFloorDB < 40) peakDB = noiseFloorDB + 40;
-
-    if (floorSmooth === null) { floorSmooth = noiseFloorDB; ceilSmooth = peakDB; }
-    floorSmooth = floorSmooth * (1 - SCALE_SHRINK_ALPHA) + noiseFloorDB * SCALE_SHRINK_ALPHA;
-    if (peakDB > ceilSmooth) {
-      ceilSmooth = ceilSmooth * (1 - SCALE_EXPAND_ALPHA) + peakDB * SCALE_EXPAND_ALPHA;
-    } else {
-      ceilSmooth = ceilSmooth * (1 - SCALE_SHRINK_ALPHA) + peakDB * SCALE_SHRINK_ALPHA;
-    }
-    if (channelLabel === 'I') { dbFloorSmoothI = floorSmooth; dbCeilSmoothI = ceilSmooth; }
-    else                      { dbFloorSmoothQ = floorSmooth; dbCeilSmoothQ = ceilSmooth; }
-
-    const dbFloor = Math.floor(floorSmooth / 10) * 10 - 20;
-    const dbCeil  = Math.ceil(ceilSmooth   / 10) * 10 + 5;
-    const dbRange = dbCeil - dbFloor || 10;
-    const dbToY   = db => plotH - ((db - dbFloor) / dbRange) * plotH;
-
-    // Spectrum bars
-    ctx.fillStyle = barColour + '88';
-    const barW = Math.max(1, plotW / numBins);
-    for (let i = binLow; i <= binHigh; i++) {
-      const x = binToX(i);
-      const y = dbToY(isFinite(smoothBuf[i]) ? smoothBuf[i] : dbFloor);
-      ctx.fillRect(x, y, barW, plotH - y);
-    }
-
-    // Y axis (minimal — just floor and ceil labels)
-    ctx.font = '8px sans-serif';
-    ctx.textAlign = 'right';
-    for (const db of [dbFloor, dbCeil]) {
-      const y = dbToY(db);
-      if (y < 0 || y > plotH) continue;
-      ctx.fillStyle = '#8b949e';
-      ctx.fillText(db + ' dB', ML - 3, y + 3);
-    }
-
-    // X axis — absolute frequency, adaptive precision
-    const offsetStart = binLow  * binHz;
-    const offsetEnd   = binHigh * binHz;
-    const offsetSpan  = (offsetEnd - offsetStart) || 1;
-    const rawStep   = offsetSpan / 5;
-    const mag10     = Math.pow(10, Math.floor(Math.log10(Math.abs(rawStep) || 1)));
-    const niceSteps = [1, 2, 5, 10, 20, 50, 100, 200, 500, 1000, 2000, 5000];
-    let freqStep    = (niceSteps.find(v => v * mag10 >= rawStep) || 100) * mag10;
-    if (freqStep < 1) freqStep = 1;
-    const mhzDecimals = Math.max(0, Math.ceil(-Math.log10(freqStep / 1e6)));
-
-    ctx.font = '8px sans-serif';
-    ctx.textAlign = 'center';
-    const firstLabel = Math.ceil(offsetStart / freqStep) * freqStep;
-    for (let f = firstLabel; f <= offsetEnd + 0.5; f += freqStep) {
-      const x = ML + ((f - offsetStart) / offsetSpan) * plotW;
-      if (x < ML - 1 || x > CW + 1) continue;
-      ctx.fillStyle = '#8b949e';
-      ctx.fillText(((_carrierFreqHz + f) / 1e6).toFixed(mhzDecimals), x, CH - 2);
-      ctx.strokeStyle = '#21262d';
-      ctx.lineWidth = 1;
-      ctx.setLineDash([2, 2]);
-      ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, plotH); ctx.stroke();
-      ctx.setLineDash([]);
-    }
-
-    // Channel label (top-right)
-    ctx.fillStyle = barColour;
-    ctx.font = 'bold 9px sans-serif';
-    ctx.textAlign = 'right';
-    ctx.fillText(channelLabel, CW - 4, 10);
 
     // Axis border
     ctx.strokeStyle = '#30363d';
