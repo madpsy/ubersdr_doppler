@@ -547,11 +547,11 @@
 
     <!-- API Reference -->
     <section id="api-section">
-      <button class="collapsible-toggle" id="api-toggle" aria-expanded="false" aria-controls="api-body">
+      <button class="collapsible-toggle" id="api-toggle" aria-expanded="true" aria-controls="api-body">
         <span class="collapsible-title">⚙ API Reference</span>
         <span class="collapsible-chevron" aria-hidden="true">▶</span>
       </button>
-      <div class="collapsible-body" id="api-body" hidden>
+      <div class="collapsible-body" id="api-body">
 
         <p class="api-intro">All endpoints are read-only <code>GET</code> requests unless noted. Responses are JSON unless the endpoint returns CSV. The <code>curl</code> examples below use the URL you are currently viewing this page on.</p>
 
@@ -645,6 +645,42 @@
           <h3 class="api-group-title">Global Settings &mdash; <code>GET / POST /api/settings</code></h3>
           <p class="api-desc"><code>GET</code> returns current settings JSON. <code>POST</code> updates settings (requires auth if a UI password is configured).</p>
           <div class="api-example"><code>curl http://localhost:8080/api/settings</code></div>
+        </div>
+
+        <!-- Audio preview -->
+        <div class="api-group">
+          <h3 class="api-group-title">Audio Preview &mdash; <code>GET /api/audio/preview</code></h3>
+          <p class="api-desc">Streams a live mono WAV audio preview of the station's carrier frequency. The connection is established on demand and dropped when the client disconnects. Useful for verifying the carrier is audible.</p>
+          <table class="api-table">
+            <thead><tr><th>Parameter</th><th>Description</th></tr></thead>
+            <tbody>
+              <tr><td><code>station=</code></td><td>Required. Station label.</td></tr>
+            </tbody>
+          </table>
+          <ul class="api-notes">
+            <li>Response: <code>audio/wav</code> with a streaming WAV header (mono, S16LE PCM). Sample rate is read from the UberSDR audio stream (default 12000 Hz).</li>
+            <li>The audio is centred 1 kHz below the carrier frequency (dial frequency = carrier − 1000 Hz), so the carrier tone appears at 1 kHz in the audio.</li>
+            <li><code>GET /api/audio/info?station=&lt;label&gt;</code> returns <code>{ sample_rate, dial_freq_hz, carrier_freq_hz, label }</code> without opening the stream.</li>
+          </ul>
+          <div class="api-example"><code>curl -N "http://localhost:8080/api/audio/preview?station=WWV-10" | aplay -f S16_LE -r 12000 -c 1</code></div>
+        </div>
+
+        <!-- IQ stream -->
+        <div class="api-group">
+          <h3 class="api-group-title">Raw IQ Stream &mdash; <code>GET /api/iq/stream</code></h3>
+          <p class="api-desc">Streams a live stereo WAV of raw IQ samples centred on the station's carrier frequency (±6 kHz, 12 kHz total bandwidth). Compatible with SDR tools and the Web Audio API.</p>
+          <table class="api-table">
+            <thead><tr><th>Parameter</th><th>Description</th></tr></thead>
+            <tbody>
+              <tr><td><code>station=</code></td><td>Required. Station label.</td></tr>
+            </tbody>
+          </table>
+          <ul class="api-notes">
+            <li>Response: <code>audio/wav</code> with a streaming WAV header. Format: 2 channels (I = left, Q = right), S16LE PCM, sample rate from UberSDR IQ stream (default 12000 Hz).</li>
+            <li>Centre frequency is the station's nominal carrier frequency. The ±6 kHz window captures the full 100 Hz Doppler monitoring band with wide margin.</li>
+            <li><code>GET /api/iq/info?station=&lt;label&gt;</code> returns <code>{ sample_rate, centre_freq_hz, bandwidth_hz, label }</code> without opening the stream.</li>
+          </ul>
+          <div class="api-example"><code>curl -N "http://localhost:8080/api/iq/stream?station=WWV-10" -o wwv10_iq.wav</code></div>
         </div>
 
       </div><!-- /.collapsible-body -->

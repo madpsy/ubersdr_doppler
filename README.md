@@ -186,6 +186,10 @@ GET /api/csv?station=WWV-10&date=2026-05-01
 | `POST` | `/api/stations/add` | Add a station (JSON body) |
 | `POST` | `/api/stations/update` | Update a station (JSON body, `id` required) |
 | `POST` | `/api/stations/remove` | Remove a station (`{"label":"..."}`) |
+| `GET` | `/api/audio/preview?station=<label>` | Streaming mono WAV audio preview (carrier − 1 kHz dial, S16LE PCM) |
+| `GET` | `/api/audio/info?station=<label>` | Audio stream metadata: `sample_rate`, `dial_freq_hz`, `carrier_freq_hz` |
+| `GET` | `/api/iq/stream?station=<label>` | Streaming stereo WAV of raw IQ samples centred on carrier (±6 kHz, I=left, Q=right, S16LE PCM) |
+| `GET` | `/api/iq/info?station=<label>` | IQ stream metadata: `sample_rate`, `centre_freq_hz`, `bandwidth_hz` |
 
 ### SSE live feed — `/api/events`
 

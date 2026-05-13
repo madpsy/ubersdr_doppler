@@ -464,10 +464,11 @@ function renderStatusTable() {
   }
 
   // ── Build a keyed map of existing rows so we can patch in-place ──────────
-  // Rows are identified by data-label; any row whose label is no longer in
-  // state.stations is removed, and new stations get a freshly created row.
+  // Rows are identified by data-label on main rows only (data-main-row="1").
+  // Prop-metric sub-rows also carry data-label but must be excluded here so
+  // the cell-patching code below doesn't run on their single-cell structure.
   const existingRows = {};
-  for (const tr of Array.from(tbody.querySelectorAll('tr[data-label]'))) {
+  for (const tr of Array.from(tbody.querySelectorAll('tr[data-main-row]'))) {
     existingRows[tr.dataset.label] = tr;
   }
 
