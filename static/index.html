@@ -662,7 +662,27 @@
             <li>The audio is centred 1 kHz below the carrier frequency (dial frequency = carrier − 1000 Hz), so the carrier tone appears at 1 kHz in the audio.</li>
             <li><code>GET /api/audio/info?station=&lt;label&gt;</code> returns <code>{ sample_rate, dial_freq_hz, carrier_freq_hz, label }</code> without opening the stream.</li>
           </ul>
-          <div class="api-example"><code>curl -N "http://localhost:8080/api/audio/preview?station=WWV-10" | aplay -f S16_LE -r 12000 -c 1</code></div>
+          <table class="api-table">
+            <thead><tr><th>Use case</th><th>Command</th></tr></thead>
+            <tbody>
+              <tr>
+                <td>Play directly (Linux, ALSA)</td>
+                <td><code>curl -sN "http://localhost:8080/api/audio/preview?station=WWV-10" | aplay -f S16_LE -r 12000 -c 1</code></td>
+              </tr>
+              <tr>
+                <td>Play with ffmpeg upsample to 48 kHz (Linux/macOS)</td>
+                <td><code>curl -sN "http://localhost:8080/api/audio/preview?station=WWV-10" | ffmpeg -i pipe:0 -af aresample=48000 -f wav pipe:1 | aplay</code></td>
+              </tr>
+              <tr>
+                <td>Play with ffmpeg on macOS (CoreAudio)</td>
+                <td><code>curl -sN "http://localhost:8080/api/audio/preview?station=WWV-10" | ffmpeg -i pipe:0 -af aresample=48000 -f wav pipe:1 | afplay -</code></td>
+              </tr>
+              <tr>
+                <td>Save to file</td>
+                <td><code>curl -sN "http://localhost:8080/api/audio/preview?station=WWV-10" -o wwv10_audio.wav</code></td>
+              </tr>
+            </tbody>
+          </table>
         </div>
 
         <!-- IQ stream -->
@@ -680,7 +700,27 @@
             <li>Centre frequency is the station's nominal carrier frequency. The ±6 kHz window captures the full 100 Hz Doppler monitoring band with wide margin.</li>
             <li><code>GET /api/iq/info?station=&lt;label&gt;</code> returns <code>{ sample_rate, centre_freq_hz, bandwidth_hz, label }</code> without opening the stream.</li>
           </ul>
-          <div class="api-example"><code>curl -N "http://localhost:8080/api/iq/stream?station=WWV-10" -o wwv10_iq.wav</code></div>
+          <table class="api-table">
+            <thead><tr><th>Use case</th><th>Command</th></tr></thead>
+            <tbody>
+              <tr>
+                <td>Save to WAV file</td>
+                <td><code>curl -sN "http://localhost:8080/api/iq/stream?station=WWV-10" -o wwv10_iq.wav</code></td>
+              </tr>
+              <tr>
+                <td>Pipe to GNU Radio / SDR tools (raw S16LE interleaved IQ)</td>
+                <td><code>curl -sN "http://localhost:8080/api/iq/stream?station=WWV-10" | ffmpeg -i pipe:0 -f s16le -ar 12000 -ac 2 pipe:1 | your-sdr-tool</code></td>
+              </tr>
+              <tr>
+                <td>Upsample to 48 kHz stereo WAV with ffmpeg</td>
+                <td><code>curl -sN "http://localhost:8080/api/iq/stream?station=WWV-10" | ffmpeg -i pipe:0 -af aresample=48000 wwv10_iq_48k.wav</code></td>
+              </tr>
+              <tr>
+                <td>Convert to complex float32 for numpy / scipy</td>
+                <td><code>curl -sN "http://localhost:8080/api/iq/stream?station=WWV-10" | ffmpeg -i pipe:0 -f f32le -ar 12000 -ac 2 pipe:1 &gt; wwv10_iq.cf32</code></td>
+              </tr>
+            </tbody>
+          </table>
         </div>
 
       </div><!-- /.collapsible-body -->
