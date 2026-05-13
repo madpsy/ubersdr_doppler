@@ -65,6 +65,16 @@
       <div id="audio-modal-status" class="audio-status-bar">
         <span id="audio-status-text" class="audio-status-connecting">⬤ Connecting…</span>
         <span id="audio-fft-info" style="margin-left:16px;color:var(--muted);font-size:0.78rem"></span>
+        <!-- Resample rate selector -->
+        <label style="margin-left:16px;font-size:0.78rem;color:var(--muted);display:flex;align-items:center;gap:4px">
+          API rate:
+          <select id="audio-resample-select" style="font-size:0.78rem;padding:2px 4px;background:var(--surface);color:var(--text);border:1px solid var(--border);border-radius:4px">
+            <option value="native" selected>native</option>
+            <option value="44100">44100 Hz</option>
+            <option value="48000">48000 Hz</option>
+            <option value="96000">96000 Hz</option>
+          </select>
+        </label>
         <!-- Audio / IQ mode toggle -->
         <span class="audio-mode-toggle" style="margin-left:auto">
           <button id="audio-mode-audio" class="btn btn-sm btn-mode active" title="Audio preview (USB, 300–1500 Hz passband)">🎧 Audio</button>
@@ -91,13 +101,13 @@
         </div>
 
         <!-- IQ spectrum — IQ mode (I on top, Q below), hidden until IQ mode active -->
-        <div class="audio-panel audio-panel-fft" id="iq-fft-panel" style="display:none">
+        <div class="audio-panel audio-panel-fft" id="iq-fft-panel" style="display:none;align-self:flex-start">
           <div class="audio-panel-label">IQ Spectrum — I channel
             <span class="audio-panel-hint">centre = <span id="iq-centre-label" style="color:var(--green)">—</span> · ±6 kHz · scroll to zoom · drag to pan · dbl-click reset</span>
           </div>
-          <canvas id="audio-iq-i-canvas" class="audio-canvas audio-canvas-fill" height="160"></canvas>
+          <canvas id="audio-iq-i-canvas" class="audio-canvas" style="height:130px"></canvas>
           <div class="audio-panel-label" style="margin-top:6px">IQ Spectrum — Q channel</div>
-          <canvas id="audio-iq-q-canvas" class="audio-canvas audio-canvas-fill" height="160"></canvas>
+          <canvas id="audio-iq-q-canvas" class="audio-canvas" style="height:130px"></canvas>
         </div>
 
         <!-- 60-second signal + SNR graph -->

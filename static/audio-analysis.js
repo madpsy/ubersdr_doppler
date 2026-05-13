@@ -35,6 +35,7 @@ const AudioAnalysisModal = (() => {
   let _showExpected   = true;  // show green 'expected' carrier line
   let _showActual     = true;  // show red 'actual' detected frequency line
   let _mode           = 'audio'; // 'audio' | 'iq'
+  let _requestedSampleRate = null; // null = native (use stream rate); number = forced rate
 
   // Audio passband limits (Hz, audio-relative from dial frequency).
   // Must match the bandwidthLow/bandwidthHigh sent to UberSDR in doppler.go.
@@ -89,7 +90,9 @@ const AudioAnalysisModal = (() => {
   const SCALE_SHRINK_ALPHA  = 0.005;
 
   // FFT zoom/pan state (in passband-bin space) — audio mode only
-  let fftView = null; // { lo: number, hi: number }
+  let fftView  = null; // { lo: number, hi: number }
+  // IQ zoom/pan state (in bin space, shared by both I and Q canvases)
+  let iqView   = null; // { lo: number, hi: number }
 
   // ---------------------------------------------------------------------------
   // Public: register a new signal/SNR reading from the SSE feed
@@ -121,6 +124,7 @@ const AudioAnalysisModal = (() => {
     smoothMagI        = null;
     smoothMagQ        = null;
     fftView           = null;
+    iqView            = null;
     dbFloorSmooth     = null;
     dbCeilSmooth      = null;
     dbFloorSmoothI    = null; dbCeilSmoothI = null;
@@ -144,12 +148,21 @@ const AudioAnalysisModal = (() => {
 
     // Attach zoom/pan interaction to audio FFT canvas (idempotent)
     attachFFTInteraction(fftCanvas);
+    // Attach zoom/pan interaction to IQ canvases (idempotent)
+    attachIQInteraction(iqICanvas);
+    attachIQInteraction(iqQCanvas);
+
+    // Reset resample dropdown to native
+    const resampleSel = document.getElementById('audio-resample-select');
+    if (resampleSel) resampleSel.value = 'native';
+    _requestedSampleRate = null;
 
     // Set initial mode UI
     _applyModeUI();
 
-    // Wire up mode toggle buttons (idempotent via flag)
+    // Wire up mode toggle buttons and resample select (idempotent via flag)
     _attachModeButtons();
+    _attachResampleSelect();
 
     // Start audio stream (default mode)
     await _startAudioStream();
@@ -182,21 +195,20 @@ const AudioAnalysisModal = (() => {
       return;
     }
 
-    try {
-      _audioCtx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: _sampleRate });
-    } catch (e) {
-      _audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    {
+      const targetRate = _requestedSampleRate !== null ? _requestedSampleRate : _sampleRate;
+      try {
+        _audioCtx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: targetRate });
+      } catch (e) {
+        _audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+      }
     }
 
-    // Update subtitle with actual AudioContext output rate (may differ from requested
-    // if the browser snapped to a supported value, e.g. 44100 instead of 12000).
+    // Update subtitle with actual AudioContext output rate (always shown).
     {
       const actualRate = _audioCtx.sampleRate;
-      const rateNote   = actualRate !== _sampleRate
-        ? ` · API out: ${actualRate} Hz`
-        : '';
       document.getElementById('audio-modal-subtitle').textContent =
-        `${fmtHzLocal(_carrierFreqHz)} carrier · stream: ${_sampleRate} Hz · dial ${fmtHzLocal(_dialFreqHz)} (USB)${rateNote}`;
+        `${fmtHzLocal(_carrierFreqHz)} carrier · stream: ${_sampleRate} Hz · API out: ${actualRate} Hz · dial ${fmtHzLocal(_dialFreqHz)} (USB)`;
     }
 
     _analyser                       = _audioCtx.createAnalyser();
@@ -256,21 +268,21 @@ const AudioAnalysisModal = (() => {
       return;
     }
 
-    try {
-      // IQ stream is stereo (2 channels) — request matching sample rate
-      _audioCtx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: _sampleRate });
-    } catch (e) {
-      _audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    {
+      // IQ stream is stereo (2 channels) — honour resample dropdown if set
+      const targetRate = _requestedSampleRate !== null ? _requestedSampleRate : _sampleRate;
+      try {
+        _audioCtx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: targetRate });
+      } catch (e) {
+        _audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+      }
     }
 
-    // Update subtitle with actual AudioContext output rate.
+    // Update subtitle with actual AudioContext output rate (always shown).
     {
       const actualRate = _audioCtx.sampleRate;
-      const rateNote   = actualRate !== _sampleRate
-        ? ` · API out: ${actualRate} Hz`
-        : '';
       document.getElementById('audio-modal-subtitle').textContent =
-        `${fmtHzLocal(_carrierFreqHz)} centre · stream: ${_sampleRate} Hz · ±${IQ_BW_HZ / 1000} kHz IQ${rateNote}`;
+        `${fmtHzLocal(_carrierFreqHz)} centre · stream: ${_sampleRate} Hz · API out: ${actualRate} Hz · ±${IQ_BW_HZ / 1000} kHz IQ`;
     }
 
     // Stereo splitter: channel 0 = I (left), channel 1 = Q (right)
@@ -380,6 +392,24 @@ const AudioAnalysisModal = (() => {
     if (iqPanel)    iqPanel.style.display    = _mode === 'iq'    ? '' : 'none';
     if (btnAudio) { btnAudio.classList.toggle('active', _mode === 'audio'); }
     if (btnIQ)    { btnIQ.classList.toggle('active',    _mode === 'iq');    }
+  }
+
+  // Wire up the resample-rate dropdown — idempotent via a flag on the element.
+  function _attachResampleSelect() {
+    const sel = document.getElementById('audio-resample-select');
+    if (!sel || sel._resampleListenerAttached) return;
+    sel._resampleListenerAttached = true;
+    sel.addEventListener('change', () => {
+      const v = sel.value;
+      _requestedSampleRate = (v === 'native') ? null : parseInt(v, 10);
+      if (!_open) return;
+      setStatus('connecting', '⬤ Reconnecting…');
+      if (_mode === 'iq') {
+        _startIQStream();
+      } else {
+        _startAudioStream();
+      }
+    });
   }
 
   // Wire up mode toggle buttons — idempotent via a flag on the element.
@@ -495,6 +525,72 @@ const AudioAnalysisModal = (() => {
     canvas.addEventListener('mouseup', endDrag);
     canvas.addEventListener('mouseleave', endDrag);
     canvas.addEventListener('dblclick', () => { fftView = null; });
+  }
+
+  // ---------------------------------------------------------------------------
+  // IQ canvas zoom/pan interaction — both I and Q canvases share iqView
+  // ---------------------------------------------------------------------------
+  function attachIQInteraction(canvas) {
+    if (!canvas || canvas._iqInteractionAttached) return;
+    canvas._iqInteractionAttached = true;
+
+    function getFullRange() {
+      const binHz = (_sampleRate || 12000) / FFT_SIZE;
+      const half  = FFT_SIZE / 2;
+      return {
+        lo: 0,
+        hi: Math.min(half - 1, Math.round(IQ_BW_HZ / binHz)),
+      };
+    }
+
+    function getView() {
+      if (!iqView) iqView = getFullRange();
+      return iqView;
+    }
+
+    canvas.addEventListener('wheel', e => {
+      e.preventDefault();
+      e.stopPropagation();
+      const full   = getFullRange();
+      const view   = getView();
+      const ML     = 46;
+      const plotW  = canvas.clientWidth - ML;
+      const rect   = canvas.getBoundingClientRect();
+      const frac   = Math.max(0, Math.min(1, (e.clientX - rect.left - ML) / plotW));
+      const span   = view.hi - view.lo;
+      const curBin = view.lo + frac * span;
+      const factor = e.deltaY < 0 ? 0.6 : 1.667;
+      const newSpan = Math.max(5, Math.min(full.hi - full.lo, span * factor));
+      let newLo = curBin - frac * newSpan;
+      let newHi = newLo + newSpan;
+      if (newLo < full.lo) { newLo = full.lo; newHi = newLo + newSpan; }
+      if (newHi > full.hi) { newHi = full.hi; newLo = newHi - newSpan; }
+      iqView = { lo: newLo, hi: newHi };
+    }, { passive: false });
+
+    let dragStart = null;
+    let dragViewLo = null;
+    canvas.addEventListener('mousedown', e => {
+      dragStart  = e.clientX;
+      dragViewLo = getView().lo;
+    });
+    canvas.addEventListener('mousemove', e => {
+      if (dragStart === null) return;
+      const view  = getView();
+      const ML    = 46;
+      const plotW = canvas.clientWidth - ML;
+      const span  = view.hi - view.lo;
+      const binsPerPx = span / plotW;
+      const dx    = e.clientX - dragStart;
+      const full  = getFullRange();
+      let newLo   = dragViewLo - dx * binsPerPx;
+      newLo = Math.max(full.lo, Math.min(full.hi - span, newLo));
+      iqView = { lo: newLo, hi: newLo + span };
+    });
+    const endDrag = () => { dragStart = null; dragViewLo = null; };
+    canvas.addEventListener('mouseup', endDrag);
+    canvas.addEventListener('mouseleave', endDrag);
+    canvas.addEventListener('dblclick', () => { iqView = null; });
   }
 
   // ---------------------------------------------------------------------------
@@ -695,7 +791,7 @@ const AudioAnalysisModal = (() => {
 
     const dpr  = window.devicePixelRatio || 1;
     const cssW = canvas.clientWidth  || 760;
-    const cssH = canvas.clientHeight || 140;
+    const cssH = canvas.clientHeight || 130;
     const W    = Math.round(cssW * dpr);
     const H    = Math.round(cssH * dpr);
     if (canvas.width !== W || canvas.height !== H) {
@@ -743,27 +839,28 @@ const AudioAnalysisModal = (() => {
     if (scaleKey === 'I') smoothMagI = smoothBuf; else smoothMagQ = smoothBuf;
 
     // IQ view: the Web Audio API gives us bins 0…half-1 where bin i = i * sr / FFT_SIZE Hz
-    // (audio-relative). For IQ centred on the carrier, audio freq 0 = carrier,
-    // and the ±IQ_BW_HZ window maps to bins 0…(IQ_BW_HZ / binHz).
-    // We show the full ±IQ_BW_HZ window: bins 0 to bwBin.
+    // (audio-relative, DC = carrier). We show bins 0…bwBin (= IQ_BW_HZ / binHz).
+    // The x-axis is labelled as Hz offset from carrier (0 … +IQ_BW_HZ).
     const binHz  = _sampleRate / FFT_SIZE;
     const bwBin  = Math.min(half - 1, Math.round(IQ_BW_HZ / binHz));
-    const binLow = 0;
-    const binHigh = bwBin;
+
+    // Apply iqView zoom/pan (shared with the other IQ canvas)
+    const fullLo = 0, fullHi = bwBin;
+    if (!iqView) iqView = { lo: fullLo, hi: fullHi };
+    const binLow  = Math.max(fullLo, Math.round(iqView.lo));
+    const binHigh = Math.min(fullHi, Math.round(iqView.hi));
     const numBins = binHigh - binLow + 1;
 
-    // Real-world frequency axis: bin 0 = carrier, bin bwBin = carrier + IQ_BW_HZ
-    // We display as offset from carrier (−IQ_BW_HZ … +IQ_BW_HZ) by mirroring:
-    // For a real IQ stream the negative frequencies are in the upper half of the
-    // stereo WAV (Web Audio only gives us 0…Nyquist), so we just show 0…+IQ_BW_HZ
-    // labelled as offset from carrier.
-    const freqStart = _carrierFreqHz;
-    const freqEnd   = _carrierFreqHz + IQ_BW_HZ;
-    const freqSpan  = IQ_BW_HZ || 1;
+    // Offset-from-carrier axis: bin i → offsetHz = i * binHz
+    // freqStart/freqEnd are offsets (Hz), not absolute frequencies.
+    const offsetStart = binLow  * binHz;
+    const offsetEnd   = binHigh * binHz;
+    const offsetSpan  = (offsetEnd - offsetStart) || 1;
 
-    const binToX = i => ML + ((i - binLow) / (numBins - 1)) * plotW;
+    // binToX maps a bin index to canvas x
+    const binToX = i => ML + ((i - binLow) / Math.max(1, numBins - 1)) * plotW;
 
-    // dB range
+    // dB range — computed over the visible bin range
     let noiseFloorDB = -100, peakDB = -40;
     {
       const vals = [];
@@ -820,35 +917,41 @@ const AudioAnalysisModal = (() => {
       ctx.setLineDash([]);
     }
 
-    // X axis — real-world frequency labels
-    const rawStep   = freqSpan / 6;
+    // X axis — offset from carrier in Hz (0 … +IQ_BW_HZ)
+    // Labels show Hz offset; unit label shows the carrier frequency.
+    const rawStep   = offsetSpan / 6;
     const mag10     = Math.pow(10, Math.floor(Math.log10(Math.abs(rawStep) || 1)));
     const niceSteps = [1, 2, 5, 10, 20, 50, 100, 200, 500, 1000, 2000, 5000];
     let freqStep    = (niceSteps.find(v => v * mag10 >= rawStep) || 100) * mag10;
     if (freqStep < 1) freqStep = 1;
-    const khzDecimals = freqStep >= 1000 ? 0 : freqStep >= 100 ? 1 : freqStep >= 10 ? 2 : 3;
+    const hzDecimals = freqStep >= 1000 ? 1 : 0;
 
     ctx.font = '9px sans-serif';
     ctx.textAlign = 'center';
-    const firstLabel = Math.ceil(freqStart / freqStep) * freqStep;
-    for (let f = firstLabel; f <= freqEnd; f += freqStep) {
-      const x = ML + ((f - freqStart) / freqSpan) * plotW;
-      if (x < ML || x > CW) continue;
+    const firstLabel = Math.ceil(offsetStart / freqStep) * freqStep;
+    for (let f = firstLabel; f <= offsetEnd + 0.5; f += freqStep) {
+      const x = ML + ((f - offsetStart) / offsetSpan) * plotW;
+      if (x < ML - 1 || x > CW + 1) continue;
       ctx.fillStyle = '#8b949e';
-      ctx.fillText((f / 1000).toFixed(khzDecimals), x, CH - 3);
+      // Show as kHz offset if ≥1000 Hz, else Hz
+      const label = f >= 1000 ? `+${(f / 1000).toFixed(hzDecimals)}k` : `+${f.toFixed(0)}`;
+      ctx.fillText(label, x, CH - 3);
       ctx.strokeStyle = '#21262d';
       ctx.lineWidth = 1;
       ctx.setLineDash([2, 2]);
       ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, plotH); ctx.stroke();
       ctx.setLineDash([]);
     }
+    // Unit label: show carrier frequency so user knows the absolute reference
     ctx.textAlign = 'right';
     ctx.fillStyle = '#555';
-    ctx.fillText('kHz', CW - 2, CH - 3);
+    ctx.fillText(`offset from ${fmtHzLocal(_carrierFreqHz)}`, CW - 2, CH - 3);
 
-    // Carrier marker (green dashed) — at bin 0 = carrier frequency
+    // Carrier marker (green dashed) — at bin 0 = 0 Hz offset = carrier
     {
-      const cx = ML; // bin 0 = left edge = carrier
+      const carrierX = ML + ((0 - offsetStart) / offsetSpan) * plotW;
+      if (carrierX >= ML && carrierX <= CW) {
+      const cx = carrierX;
       ctx.strokeStyle = '#3fb950';
       ctx.lineWidth = 1.5;
       ctx.setLineDash([4, 3]);
@@ -858,6 +961,7 @@ const AudioAnalysisModal = (() => {
       ctx.font = '9px sans-serif';
       ctx.textAlign = 'left';
       ctx.fillText('carrier', cx + 3, 10);
+      } // end if carrierX in view
     }
 
     // Channel label (top-right)
