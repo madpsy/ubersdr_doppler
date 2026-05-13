@@ -603,8 +603,26 @@
           <div class="api-example"><code>curl -N "http://localhost:8080/api/events?station=WWV-10"</code></div>
           <ul class="api-notes">
             <li>Event types: <code>connected</code> (on connect), <code>heartbeat</code> (every 15 s), <code>spectrum</code> (FFT bins), unnamed data events (readings).</li>
-            <li>Each reading payload: <code>{ station, reading: { timestamp, doppler_hz, corrected_doppler_hz, snr_db, signal_dbfs, noise_dbfs, valid }, server_time }</code></li>
           </ul>
+          <table class="api-table">
+            <thead><tr><th>Field</th><th>Type</th><th>Description</th></tr></thead>
+            <tbody>
+              <tr><td><code>station</code></td><td>string</td><td>Station label as configured.</td></tr>
+              <tr><td><code>server_time</code></td><td>RFC 3339</td><td>Wall-clock time the server emitted this event.</td></tr>
+              <tr><td colspan="3" style="background:var(--surface2);font-weight:600;font-size:0.78rem;letter-spacing:0.04em;text-transform:uppercase;color:var(--muted)">reading fields</td></tr>
+              <tr><td><code>timestamp</code></td><td>RFC 3339</td><td>UTC time of this 1-second measurement.</td></tr>
+              <tr><td><code>doppler_hz</code></td><td>float64</td><td>Measured carrier offset from nominal frequency (Hz). Positive = higher than nominal.</td></tr>
+              <tr><td><code>corrected_doppler_hz</code></td><td>float64 | omitted</td><td>Doppler after subtracting the reference station's clock error (Hz). Omitted when no reference station is configured or the reference has no valid signal.</td></tr>
+              <tr><td><code>snr_db</code></td><td>float32</td><td>Signal-to-noise ratio of the carrier peak (dB above noise floor).</td></tr>
+              <tr><td><code>signal_dbfs</code></td><td>float32</td><td>Peak carrier power (dBFS).</td></tr>
+              <tr><td><code>noise_dbfs</code></td><td>float32</td><td>Estimated noise floor — 5th-percentile power across the full 100 Hz window (dBFS).</td></tr>
+              <tr><td><code>valid</code></td><td>bool</td><td><code>true</code> when SNR ≥ threshold and the carrier peak passes all quality gates. <code>false</code> readings still carry <code>snr_db</code>, <code>signal_dbfs</code>, and <code>noise_dbfs</code>.</td></tr>
+              <tr><td colspan="3" style="background:var(--surface2);font-weight:600;font-size:0.78rem;letter-spacing:0.04em;text-transform:uppercase;color:var(--muted)">propagation metrics — omitted until ≥10 valid samples; always omitted when valid = false</td></tr>
+              <tr><td><code>doppler_spread_hz</code></td><td>float64 | omitted</td><td>Standard deviation of <code>doppler_hz</code> over the last ≤60 valid samples. Elevated values (&gt;0.1 Hz) indicate ionospheric spread-F, multipath, or rapid fading. Typical quiet-ionosphere value: &lt;0.05 Hz.</td></tr>
+              <tr><td><code>scintillation_s4</code></td><td>float64 | omitted</td><td>Amplitude scintillation index S4 = stddev(A)/mean(A) where A = 10^(signal_dbfs/20) (linear amplitude), over the same rolling window. Values &gt;0.3 indicate moderate scintillation.</td></tr>
+              <tr><td><code>multipath_index</code></td><td>float64 | omitted</td><td>Ratio of sideband energy to carrier energy in the FFT window: sum of linear power in ±10 Hz sideband (excluding ±4 Hz guard) divided by carrier linear power. Higher values indicate stronger multipath or adjacent interference. Typical clean-path value: &lt;0.01.</td></tr>
+            </tbody>
+          </table>
         </div>
 
         <!-- History -->

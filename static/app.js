@@ -576,10 +576,12 @@ function renderStatusTable() {
       dotTitle = `Poor signal — SNR ${r.snr_db.toFixed(1)} dB`;
     }
 
-    // Propagation metrics row — shown only when at least one metric is available.
-    const spread  = valid ? (r.doppler_spread_hz  ?? null) : null;
-    const s4      = valid ? (r.scintillation_s4   ?? null) : null;
-    const mpath   = valid ? (r.multipath_index    ?? null) : null;
+    // Propagation metrics row — shown only when at least one metric is available
+    // and the station is not the reference station (reference metrics are less
+    // meaningful since the reference is used to correct other stations).
+    const spread  = (valid && !isRef) ? (r.doppler_spread_hz  ?? null) : null;
+    const s4      = (valid && !isRef) ? (r.scintillation_s4   ?? null) : null;
+    const mpath   = (valid && !isRef) ? (r.multipath_index    ?? null) : null;
     const hasProp = spread !== null || s4 !== null || mpath !== null;
 
     // Row-level CSS class
