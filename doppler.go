@@ -1784,6 +1784,77 @@ func (ds *DopplerStation) History() []MinuteMean {
 	return out
 }
 
+// ClearHistory wipes the in-memory history slice and deletes ALL on-disk history
+// JSON files for this station across every date directory under historyDataDir.
+// Safe to call at any time; the station goroutine will continue running normally.
+func (ds *DopplerStation) ClearHistory() {
+	ds.mu.Lock()
+	ds.history = nil
+	ds.mu.Unlock()
+
+	if ds.historyDataDir == "" || ds.historySafeLabel == "" {
+		return
+	}
+
+	// Walk the entire data directory tree and remove every history-<label>.json
+	// file regardless of date, so no stale data remains on disk.
+	target := "history-" + ds.historySafeLabel + ".json"
+	deleted := 0
+	walkErr := filepath.Walk(ds.historyDataDir, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return nil // skip unreadable entries
+		}
+		if !info.IsDir() && info.Name() == target {
+			if removeErr := os.Remove(path); removeErr != nil && !os.IsNotExist(removeErr) {
+				log.Printf("[%s] clear-history: remove %s: %v", ds.cfg.Label, path, removeErr)
+			} else {
+				deleted++
+			}
+		}
+		return nil
+	})
+	if walkErr != nil {
+		log.Printf("[%s] clear-history: walk error: %v", ds.cfg.Label, walkErr)
+	}
+	log.Printf("[%s] history cleared (%d file(s) deleted)", ds.cfg.Label, deleted)
+}
+
+// sanitiseMinuteMeans replaces any NaN/Inf float values with 0 so json.Marshal
+// never fails on history data that was written by an older buggy version of the code.
+// Operates in-place on the slice and returns it for convenience.
+func sanitiseMinuteMeans(in []MinuteMean) []MinuteMean {
+	for i := range in {
+		m := &in[i]
+		if math.IsNaN(m.DopplerHz) || math.IsInf(m.DopplerHz, 0) {
+			m.DopplerHz = 0
+		}
+		if math.IsNaN(m.MinDopplerHz) || math.IsInf(m.MinDopplerHz, 0) {
+			m.MinDopplerHz = 0
+		}
+		if math.IsNaN(m.MaxDopplerHz) || math.IsInf(m.MaxDopplerHz, 0) {
+			m.MaxDopplerHz = 0
+		}
+		if math.IsNaN(m.StdDevHz) || math.IsInf(m.StdDevHz, 0) {
+			m.StdDevHz = 0
+		}
+		if math.IsNaN(float64(m.SNR)) || math.IsInf(float64(m.SNR), 0) {
+			m.SNR = 0
+		}
+		if math.IsNaN(float64(m.SignalDBFS)) || math.IsInf(float64(m.SignalDBFS), 0) {
+			m.SignalDBFS = 0
+		}
+		if math.IsNaN(float64(m.NoiseDBFS)) || math.IsInf(float64(m.NoiseDBFS), 0) {
+			m.NoiseDBFS = 0
+		}
+		if m.CorrectedDopplerHz != nil {
+			if math.IsNaN(*m.CorrectedDopplerHz) || math.IsInf(*m.CorrectedDopplerHz, 0) {
+				m.CorrectedDopplerHz = nil
+			}
+		}
+	}
+	return in
+}
+
 // smoothMinuteMeans applies a centred rolling average of width w over a
 // []MinuteMean slice and returns the smoothed result.  w=1 is a no-op.
 // The timestamp of each output point is taken from the corresponding input

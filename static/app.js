@@ -1998,7 +1998,8 @@ async function loadHistory() {
         ? `/api/history?station=${encodeURIComponent(label)}&date=${encodeURIComponent(state.chartDate)}${smoothParam}`
         : `/api/history?station=${encodeURIComponent(label)}${smoothParam}`;
       const r = await apiFetch(url);
-      const history = await r.json() || [];
+      let history = [];
+      try { history = (await r.json()) || []; } catch (_) {}
       const filtered = usingDate
         ? history  // server already filtered to the day
         : history.filter(m => new Date(m.timestamp).getTime() >= cutoff);
@@ -2251,6 +2252,19 @@ function appendLivePoint(label, reading) {
   trimDs(sDs); trimDs(pDs);
   if (vDs) trimDs(vDs);
 
+  // Advance the X axis right edge to now when in live (non-zoomed) mode.
+  // applyChartZoom() pins x.max = Date.now() once when loadHistory() runs.
+  // Without this, stations that have no historical data (all points arrive
+  // after the axis was pinned) are clipped off the right edge entirely.
+  if (state.zoomedXMax === null) {
+    const win = chartWindowRange();
+    [state.dopplerChart, state.snrChart, state.powerChart, state.vpkChart].forEach(c => {
+      if (!c) return;
+      c.options.scales.x.min = win.min;
+      c.options.scales.x.max = win.max;
+    });
+  }
+
   state.dopplerChart.update('none');
   state.snrChart.update('none');
   state.powerChart.update('none');
@@ -2475,6 +2489,13 @@ function openModal(title, cfg = {}) {
   if (presetRow) presetRow.style.display = isEdit ? 'none' : '';
   const presetSel = document.getElementById('f-preset');
   if (presetSel) presetSel.value = '';
+  // Show Delete History button only when editing and user is authenticated
+  const delHistBtn = document.getElementById('delete-history-btn');
+  if (delHistBtn) {
+    const canWrite = !state.auth.passwordConfigured || state.auth.authenticated;
+    delHistBtn.style.display = (isEdit && canWrite) ? '' : 'none';
+    delHistBtn.dataset.label = cfg.label || '';
+  }
   document.getElementById('modal').classList.remove('hidden');
   document.getElementById('f-label').focus();
 }
@@ -3261,4 +3282,74 @@ document.addEventListener('DOMContentLoaded', async () => {
       setTimeout(() => URL.revokeObjectURL(url), 10000);
     }, 'image/png');
   });
+
+  // ── Delete History modal ─────────────────────────────────────────────────
+  const deleteHistoryBtn       = document.getElementById('delete-history-btn');
+  const deleteHistoryModal     = document.getElementById('delete-history-modal');
+  const deleteHistoryLabelEl   = document.getElementById('delete-history-label');
+  const deleteHistoryCheck     = document.getElementById('delete-history-confirm-check');
+  const deleteHistoryConfirm   = document.getElementById('delete-history-confirm-btn');
+  const deleteHistoryCancelBtn = document.getElementById('delete-history-cancel-btn');
+
+  function openDeleteHistoryModal(label) {
+    if (!deleteHistoryModal) return;
+    if (deleteHistoryLabelEl) deleteHistoryLabelEl.textContent = label;
+    if (deleteHistoryCheck)   deleteHistoryCheck.checked = false;
+    if (deleteHistoryConfirm) deleteHistoryConfirm.disabled = true;
+    deleteHistoryModal.classList.remove('hidden');
+  }
+
+  function closeDeleteHistoryModal() {
+    if (deleteHistoryModal) deleteHistoryModal.classList.add('hidden');
+  }
+
+  if (deleteHistoryBtn) {
+    deleteHistoryBtn.addEventListener('click', () => {
+      const label = deleteHistoryBtn.dataset.label;
+      if (label) openDeleteHistoryModal(label);
+    });
+  }
+
+  if (deleteHistoryCheck) {
+    deleteHistoryCheck.addEventListener('change', () => {
+      if (deleteHistoryConfirm) deleteHistoryConfirm.disabled = !deleteHistoryCheck.checked;
+    });
+  }
+
+  if (deleteHistoryCancelBtn) {
+    deleteHistoryCancelBtn.addEventListener('click', closeDeleteHistoryModal);
+  }
+
+  if (deleteHistoryModal) {
+    deleteHistoryModal.addEventListener('click', e => {
+      if (e.target === deleteHistoryModal) closeDeleteHistoryModal();
+    });
+  }
+
+  if (deleteHistoryConfirm) {
+    deleteHistoryConfirm.addEventListener('click', async () => {
+      const label = deleteHistoryBtn ? deleteHistoryBtn.dataset.label : '';
+      if (!label) return;
+      deleteHistoryConfirm.disabled = true;
+      deleteHistoryConfirm.textContent = '⏳ Deleting…';
+      try {
+        await apiFetch('/api/stations/clear-history', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ label }),
+        });
+        closeDeleteHistoryModal();
+        closeModal();
+        // Reload history charts so the cleared station shows an empty dataset
+        await loadHistory();
+      } catch (err) {
+        alert('Error deleting history: ' + err.message);
+      } finally {
+        if (deleteHistoryConfirm) {
+          deleteHistoryConfirm.disabled = false;
+          deleteHistoryConfirm.textContent = 'Delete History';
+        }
+      }
+    });
+  }
 });

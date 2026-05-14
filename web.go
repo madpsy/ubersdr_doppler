@@ -584,9 +584,13 @@ func startHTTPServer(
 				if history == nil {
 					history = []MinuteMean{} // return empty array, not null
 				}
-				jsonResponse(w, smoothMinuteMeans(history, smoothN))
+				jsonResponse(w, smoothMinuteMeans(sanitiseMinuteMeans(history), smoothN))
 			} else {
-				jsonResponse(w, smoothMinuteMeans(ds.History(), smoothN))
+				h := ds.History()
+				if h == nil {
+					h = []MinuteMean{}
+				}
+				jsonResponse(w, smoothMinuteMeans(sanitiseMinuteMeans(h), smoothN))
 			}
 			return
 		}
@@ -670,6 +674,39 @@ func startHTTPServer(
 			return
 		}
 		w.WriteHeader(http.StatusNoContent)
+	})
+
+	// POST /api/stations/clear-history
+	// Wipes the in-memory history and deletes the on-disk history JSON files
+	// for the named station.  Requires authentication.
+	mux.HandleFunc("/api/stations/clear-history", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		if !requiresAuth(w, r, uiPassword, sessions) {
+			return
+		}
+		var req struct {
+			Label string `json:"label"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, "invalid JSON", http.StatusBadRequest)
+			return
+		}
+		if req.Label == "" {
+			http.Error(w, "label is required", http.StatusBadRequest)
+			return
+		}
+		for _, ds := range mgr.list() {
+			if ds.cfg.Label == req.Label {
+				ds.ClearHistory()
+				log.Printf("[web] history cleared for station %q", req.Label)
+				w.WriteHeader(http.StatusNoContent)
+				return
+			}
+		}
+		http.Error(w, "station not found", http.StatusNotFound)
 	})
 
 	// ── CSV download ───────────────────────────────────────────────────────
@@ -1113,10 +1150,14 @@ func startHTTPServer(
 }
 
 // jsonResponse writes v as JSON with Content-Type application/json.
+// If encoding fails (e.g. NaN/Inf float values in history data), it logs the
+// error and writes "[]" so the response body is never empty.
 func jsonResponse(w http.ResponseWriter, v interface{}) {
 	w.Header().Set("Content-Type", "application/json")
 	if err := json.NewEncoder(w).Encode(v); err != nil {
 		log.Printf("[web] json encode: %v", err)
+		// Headers already committed — write a safe fallback so the body is never empty.
+		_, _ = w.Write([]byte("[]\n"))
 	}
 }
 

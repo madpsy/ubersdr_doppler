@@ -368,8 +368,31 @@
             <div class="form-actions">
               <button type="submit" class="btn btn-primary">Save</button>
               <button type="button" id="modal-cancel" class="btn btn-secondary">Cancel</button>
+              <button type="button" id="delete-history-btn" class="btn btn-danger" style="display:none;margin-left:auto">🗑 Delete History</button>
             </div>
           </form>
+        </div>
+      </div>
+
+      <!-- Delete History confirm modal -->
+      <div id="delete-history-modal" class="modal hidden">
+        <div class="modal-box" style="max-width:420px">
+          <h3 style="color:var(--red)">⚠ Delete Station History</h3>
+          <p style="margin:12px 0 8px">This will permanently delete all recorded history for <strong id="delete-history-label"></strong>, including:</p>
+          <ul style="color:var(--muted);font-size:0.88rem;margin:0 0 12px 18px;line-height:1.7">
+            <li>All in-memory minute-mean data</li>
+            <li>The on-disk history JSON files for today and yesterday</li>
+          </ul>
+          <p style="color:var(--muted);font-size:0.85rem;margin-bottom:16px">Live data will resume accumulating immediately. This cannot be undone.</p>
+          <div style="margin-bottom:16px">
+            <label class="checkbox-label" style="font-size:0.9rem">
+              <input type="checkbox" id="delete-history-confirm-check"> I understand this is permanent and cannot be undone
+            </label>
+          </div>
+          <div class="form-actions">
+            <button type="button" id="delete-history-confirm-btn" class="btn btn-danger" disabled>Delete History</button>
+            <button type="button" id="delete-history-cancel-btn" class="btn btn-secondary">Cancel</button>
+          </div>
         </div>
       </div>
     </section>
