@@ -1357,7 +1357,36 @@ const sunLinePlugin = {
     const ctx = chart.ctx;
 
     // Collect all lines to draw so we can draw lines (clipped) then labels (unclipped)
-    const lines = []; // { x, strokeStyle, dash, fillStyle, label, labelY }
+    const lines = []; // { x, strokeStyle, dash, fillStyle, label }
+
+    // ── Receiver sunrise/sunset lines (white, solid/long-dash) ───────────────
+    const rxTimes = sunTimesAt(rxPos.lat, rxPos.lon, xMin, xMax);
+    const rxCallsign = state.receiverCallsign || 'RX';
+    rxTimes.forEach(({ sunrise, sunset }) => {
+      const srX = xScale.getPixelForValue(sunrise.getTime());
+      const ssX = xScale.getPixelForValue(sunset.getTime());
+      const inWindow = t => t >= xScale.left && t <= xScale.right;
+      if (inWindow(srX)) {
+        lines.push({
+          x: srX,
+          strokeStyle: 'rgba(255,255,255,0.55)',
+          dash: [6, 3],
+          fillStyle: 'rgba(255,255,255,0.85)',
+          label: `☀️ ${rxCallsign}`,
+          _isEndpoint: true,
+        });
+      }
+      if (inWindow(ssX)) {
+        lines.push({
+          x: ssX,
+          strokeStyle: 'rgba(255,255,255,0.35)',
+          dash: [2, 5],
+          fillStyle: 'rgba(255,255,255,0.65)',
+          label: `🌙 ${rxCallsign}`,
+          _isEndpoint: true,
+        });
+      }
+    });
 
     state.stations.forEach((s, stationIdx) => {
       if (!s.config || !s.config.grid || s.config.is_reference) return;
@@ -1371,6 +1400,35 @@ const sunLinePlugin = {
       const reflPoints = hopReflectionPoints(rxPos, txPos, freqHz);
       const stationColour = colourForIndex(stationIdx);
 
+      // ── Transmitter sunrise/sunset lines (station colour, thick solid/long-dash) ──
+      const txTimes = sunTimesAt(txPos.lat, txPos.lon, xMin, xMax);
+      txTimes.forEach(({ sunrise, sunset }) => {
+        const srX = xScale.getPixelForValue(sunrise.getTime());
+        const ssX = xScale.getPixelForValue(sunset.getTime());
+        const inWindow = t => t >= xScale.left && t <= xScale.right;
+        if (inWindow(srX)) {
+          lines.push({
+            x: srX,
+            strokeStyle: stationColour + 'cc',
+            dash: [8, 3],
+            fillStyle: stationColour + 'ff',
+            label: `☀️ ${s.config.label} TX`,
+            _isEndpoint: true,
+          });
+        }
+        if (inWindow(ssX)) {
+          lines.push({
+            x: ssX,
+            strokeStyle: stationColour + '77',
+            dash: [3, 5],
+            fillStyle: stationColour + 'bb',
+            label: `🌙 ${s.config.label} TX`,
+            _isEndpoint: true,
+          });
+        }
+      });
+
+      // ── Hop reflection point sunrise/sunset lines (station colour, short-dash) ──
       reflPoints.forEach(({ lat, lon, hopIndex, totalHops }) => {
         const times = sunTimesAt(lat, lon, xMin, xMax);
         const hopLabel = totalHops > 1 ? ` h${hopIndex}/${totalHops}` : '';
@@ -1410,8 +1468,8 @@ const sunLinePlugin = {
     ctx.beginPath();
     ctx.rect(xScale.left, yScale.top, xScale.right - xScale.left, yScale.bottom - yScale.top);
     ctx.clip();
-    ctx.lineWidth = 1.5;
-    lines.forEach(({ x, strokeStyle, dash }) => {
+    lines.forEach(({ x, strokeStyle, dash, _isEndpoint }) => {
+      ctx.lineWidth = _isEndpoint ? 2 : 1.5;
       ctx.strokeStyle = strokeStyle;
       ctx.setLineDash(dash);
       ctx.beginPath();

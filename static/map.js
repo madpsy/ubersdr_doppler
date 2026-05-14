@@ -149,12 +149,25 @@ window.DopplerMap = (() => {
     // Show GPS precision indicator when using exact coords
     const coordLabel = hasGPS ? 'GPS Lat/Lon' : 'Lat/Lon (grid)';
 
+    // Sunrise/sunset at receiver location
+    const rxNow = new Date();
+    const rxTimes = SunCalc.getTimes(rxNow, pos.lat, pos.lon);
+    const rxSrStr = rxTimes.sunrise && isFinite(rxTimes.sunrise.getTime())
+      ? rxTimes.sunrise.toISOString().slice(11, 16) + ' UTC' : 'N/A';
+    const rxSsStr = rxTimes.sunset && isFinite(rxTimes.sunset.getTime())
+      ? rxTimes.sunset.toISOString().slice(11, 16) + ' UTC' : 'N/A';
+    const rxSunAlt = SunCalc.getPosition(rxNow, pos.lat, pos.lon).altitude;
+    const rxDayNight = rxSunAlt > 0 ? '☀️ Daylight' : '🌙 Night';
+
     const popupHtml = `
       <div class="map-popup">
         <div class="map-popup-title" style="color:#f0c040">${titleText}</div>
         ${callsignRow}
         ${gridRow}
         <div class="map-popup-row"><span class="map-popup-label">${coordLabel}</span><span>${pos.lat.toFixed(4)}°, ${pos.lon.toFixed(4)}°</span></div>
+        <div class="map-popup-row"><span class="map-popup-label">Now</span><span>${rxDayNight}</span></div>
+        <div class="map-popup-row"><span class="map-popup-label">☀️ Sunrise</span><span>${rxSrStr}</span></div>
+        <div class="map-popup-row"><span class="map-popup-label">🌙 Sunset</span><span>${rxSsStr}</span></div>
       </div>`;
 
     if (rxMarker) {
@@ -222,6 +235,15 @@ window.DopplerMap = (() => {
       `, { maxWidth: 220 }).addTo(map);
 
       // ── Transmitter marker ──
+      const txNow = new Date();
+      const txTimes = SunCalc.getTimes(txNow, txPos.lat, txPos.lon);
+      const txSrStr = txTimes.sunrise && isFinite(txTimes.sunrise.getTime())
+        ? txTimes.sunrise.toISOString().slice(11, 16) + ' UTC' : 'N/A';
+      const txSsStr = txTimes.sunset && isFinite(txTimes.sunset.getTime())
+        ? txTimes.sunset.toISOString().slice(11, 16) + ' UTC' : 'N/A';
+      const txSunAlt = SunCalc.getPosition(txNow, txPos.lat, txPos.lon).altitude;
+      const txDayNight = txSunAlt > 0 ? '☀️ Daylight' : '🌙 Night';
+
       const txMarker = L.marker([txPos.lat, txPos.lon], {
         icon: txIcon(colour),
         zIndexOffset: 500,
@@ -233,6 +255,9 @@ window.DopplerMap = (() => {
           <div class="map-popup-row"><span class="map-popup-label">Lat/Lon</span><span>${txPos.lat.toFixed(3)}°, ${txPos.lon.toFixed(3)}°</span></div>
           <div class="map-popup-row"><span class="map-popup-label">Distance</span><span>${distKm.toFixed(0)} km</span></div>
           <div class="map-popup-row"><span class="map-popup-label">Est. hops</span><span>${nHops}</span></div>
+          <div class="map-popup-row"><span class="map-popup-label">Now</span><span>${txDayNight}</span></div>
+          <div class="map-popup-row"><span class="map-popup-label">☀️ Sunrise</span><span>${txSrStr}</span></div>
+          <div class="map-popup-row"><span class="map-popup-label">🌙 Sunset</span><span>${txSsStr}</span></div>
         </div>
       `, { maxWidth: 240 }).addTo(map);
 
