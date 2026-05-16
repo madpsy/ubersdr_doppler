@@ -1855,6 +1855,45 @@ func sanitiseMinuteMeans(in []MinuteMean) []MinuteMean {
 	return in
 }
 
+// sanitiseDopplerReading replaces any NaN/Inf float values in a DopplerReading
+// with safe zero values so json.Marshal never fails on live reading data.
+// Operates on a copy and returns it.
+func sanitiseDopplerReading(r DopplerReading) DopplerReading {
+	if math.IsNaN(r.DopplerHz) || math.IsInf(r.DopplerHz, 0) {
+		r.DopplerHz = 0
+	}
+	if math.IsNaN(float64(r.SNR)) || math.IsInf(float64(r.SNR), 0) {
+		r.SNR = 0
+	}
+	if math.IsNaN(float64(r.SignalDBFS)) || math.IsInf(float64(r.SignalDBFS), 0) {
+		r.SignalDBFS = 0
+	}
+	if math.IsNaN(float64(r.NoiseDBFS)) || math.IsInf(float64(r.NoiseDBFS), 0) {
+		r.NoiseDBFS = 0
+	}
+	if r.CorrectedDopplerHz != nil {
+		if math.IsNaN(*r.CorrectedDopplerHz) || math.IsInf(*r.CorrectedDopplerHz, 0) {
+			r.CorrectedDopplerHz = nil
+		}
+	}
+	if r.DopplerSpreadHz != nil {
+		if math.IsNaN(*r.DopplerSpreadHz) || math.IsInf(*r.DopplerSpreadHz, 0) {
+			r.DopplerSpreadHz = nil
+		}
+	}
+	if r.ScintillationS4 != nil {
+		if math.IsNaN(*r.ScintillationS4) || math.IsInf(*r.ScintillationS4, 0) {
+			r.ScintillationS4 = nil
+		}
+	}
+	if r.MultipathIndex != nil {
+		if math.IsNaN(*r.MultipathIndex) || math.IsInf(*r.MultipathIndex, 0) {
+			r.MultipathIndex = nil
+		}
+	}
+	return r
+}
+
 // smoothMinuteMeans applies a centred rolling average of width w over a
 // []MinuteMean slice and returns the smoothed result.  w=1 is a no-op.
 // The timestamp of each output point is taken from the corresponding input
