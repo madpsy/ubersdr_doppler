@@ -2842,12 +2842,31 @@ document.addEventListener('DOMContentLoaded', async () => {
   // ── Preset selector ──────────────────────────────────────────────────────
   // Known Maidenhead locators for preset stations
   const PRESET_GRID = {
+    // WWV — Fort Collins, Colorado (40.6776°N, 105.0475°W)
     'WWV-2.5':  'DN70lq',
     'WWV-5':    'DN70lq',
     'WWV-10':   'DN70lq',
     'WWV-15':   'DN70lq',
     'WWV-20':   'DN70lq',
     'WWV-25':   'DN70lq',
+    // WWVH — Kauai, Hawaii (21.9875°N, 159.7644°W)
+    'WWVH-2.5': 'BL11bh',
+    'WWVH-5':   'BL11bh',
+    'WWVH-10':  'BL11bh',
+    'WWVH-15':  'BL11bh',
+    // CHU — Ottawa, Ontario (45.2939°N, 75.7533°W)
+    'CHU-3':    'FN25dj',
+    'CHU-7':    'FN25dj',
+    'CHU-14':   'FN25dj',
+    // BPM — Pucheng, Shaanxi, China (34.9400°N, 109.5440°E)
+    'BPM-2.5':  'OM94lw',
+    'BPM-5':    'OM94lw',
+    'BPM-10':   'OM94lw',
+    'BPM-15':   'OM94lw',
+    // JJY-40 — Fukushima, Japan (37.3713°N, 140.8488°E)
+    'JJY-40':   'QM07ji',
+    // JJY-60 — Saga, Japan (33.4658°N, 130.1758°E)
+    'JJY-60':   'PM53kl',
   };
 
   const presetSel = document.getElementById('f-preset');

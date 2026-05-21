@@ -190,6 +190,20 @@ window.DopplerMap = (() => {
     stationLayers = {};
   }
 
+  // Known transmitter grids for preset stations — mirrors PRESET_GRID in app.js.
+  // Used as a fallback when s.config.grid is missing or equals the receiver grid,
+  // so existing stations with incorrectly-entered grids self-heal on the map.
+  const TX_GRID = {
+    'WWV-2.5':  'DN70lq', 'WWV-5':   'DN70lq', 'WWV-10':  'DN70lq',
+    'WWV-15':   'DN70lq', 'WWV-20':  'DN70lq', 'WWV-25':  'DN70lq',
+    'WWVH-2.5': 'BL11bh', 'WWVH-5':  'BL11bh', 'WWVH-10': 'BL11bh',
+    'WWVH-15':  'BL11bh',
+    'CHU-3':    'FN25dj', 'CHU-7':   'FN25dj', 'CHU-14':  'FN25dj',
+    'BPM-2.5':  'OM94lw', 'BPM-5':   'OM94lw', 'BPM-10':  'OM94lw',
+    'BPM-15':   'OM94lw',
+    'JJY-40':   'QM07ji', 'JJY-60':  'PM53kl',
+  };
+
   function buildStationLayers(stations, rxGrid) {
     // Prefer precise GPS coords for path/hop calculations; fall back to grid centre
     let rxPos = null;
@@ -203,94 +217,143 @@ window.DopplerMap = (() => {
     }
     if (!rxPos) return;
 
+    // ── Resolve each station's transmitter grid ──────────────────────────────
+    // s.config.grid is the operator's entry in the station form.  For preset
+    // stations it should be the transmitter's Maidenhead grid, but operators
+    // sometimes enter their own receiver grid by mistake.  Fall back to TX_GRID
+    // (keyed by label) so the map self-heals without requiring manual edits.
+    // Stations whose resolved grid equals the receiver grid are also redirected
+    // to the TX_GRID fallback so they don't stack on the receiver marker.
+    function resolveTxGrid(s) {
+      const cfgGrid = s.config.grid || '';
+      // If the stored grid differs from the receiver grid, trust it.
+      if (cfgGrid && cfgGrid !== rxGrid) return cfgGrid;
+      // Otherwise fall back to the known transmitter grid for this label.
+      return TX_GRID[s.config.label] || cfgGrid;
+    }
+
+    // ── Group stations by resolved transmitter grid ───────────────────────────
+    // Co-located transmitters (e.g. WWV-5/10/15 all at DN70lq) share one
+    // marker and one set of reflection points; each frequency gets its own
+    // great-circle path line so propagation differences are visible.
+    // Use the station's index in the full stations array for colour assignment
+    // so colours match the toggle control (which also uses stations.indexOf).
+    const byGrid = {};   // txGrid → [ { s, idx, txGrid, txPos } ]
     stations.forEach((s, idx) => {
-      if (!s.config || !s.config.grid || s.config.is_reference) return;
-      // Skip stations the user has hidden
+      if (!s.config || s.config.is_reference) return;
       if (stationVisible[s.config.label] === false) return;
-      const txPos = maidenheadToLatLon(s.config.grid);
+      const txGrid = resolveTxGrid(s);
+      if (!txGrid) return;
+      const txPos = maidenheadToLatLon(txGrid);
       if (!txPos) return;
+      if (!byGrid[txGrid]) byGrid[txGrid] = [];
+      byGrid[txGrid].push({ s, idx, txGrid, txPos });
+    });
 
-      const label   = s.config.label;
-      const freqHz  = s.config.freq_hz || 10e6;
-      const colour  = colourForIndex(idx);
-      const distKm  = haversineKm(rxPos, txPos);
-      const nHops   = estimateHopCount(distKm, freqHz);
-      const reflPts = hopReflectionPoints(rxPos, txPos, freqHz);
+    // ── Render one group per unique transmitter location ─────────────────────
+    Object.values(byGrid).forEach(group => {
+      const { txGrid, txPos } = group[0];
 
-      // ── Great-circle path ──
-      const pathPts = gcPolyline(rxPos, txPos);
-      const pathLine = L.polyline(pathPts, {
-        color:     colour,
-        weight:    2,
-        opacity:   0.75,
-        dashArray: '6 4',
-        smoothFactor: 1,
-      }).bindPopup(`
-        <div class="map-popup">
-          <div class="map-popup-title" style="color:${colour}">${label} — propagation path</div>
-          <div class="map-popup-row"><span class="map-popup-label">Distance</span><span>${distKm.toFixed(0)} km</span></div>
-          <div class="map-popup-row"><span class="map-popup-label">Frequency</span><span>${(freqHz/1e6).toFixed(2)} MHz</span></div>
-          <div class="map-popup-row"><span class="map-popup-label">Est. hops</span><span>${nHops}</span></div>
-        </div>
-      `, { maxWidth: 220 }).addTo(map);
+      // Use the colour of the first station in the group for the shared marker.
+      const markerColour = colourForIndex(group[0].idx);
 
-      // ── Transmitter marker ──
-      const txNow = new Date();
-      const txTimes = SunCalc.getTimes(txNow, txPos.lat, txPos.lon);
-      const txSrStr = txTimes.sunrise && isFinite(txTimes.sunrise.getTime())
+      // ── Shared transmitter marker ──
+      const txNow    = new Date();
+      const txTimes  = SunCalc.getTimes(txNow, txPos.lat, txPos.lon);
+      const txSrStr  = txTimes.sunrise && isFinite(txTimes.sunrise.getTime())
         ? txTimes.sunrise.toISOString().slice(11, 16) + ' UTC' : 'N/A';
-      const txSsStr = txTimes.sunset && isFinite(txTimes.sunset.getTime())
+      const txSsStr  = txTimes.sunset && isFinite(txTimes.sunset.getTime())
         ? txTimes.sunset.toISOString().slice(11, 16) + ' UTC' : 'N/A';
       const txSunAlt = SunCalc.getPosition(txNow, txPos.lat, txPos.lon).altitude;
       const txDayNight = txSunAlt > 0 ? '☀️ Daylight' : '🌙 Night';
 
+      // Build one popup row per station in this group.
+      const freqRows = group.map(({ s, idx }) => {
+        const colour  = colourForIndex(idx);
+        const freqHz  = s.config.freq_hz || 10e6;
+        const distKm  = haversineKm(rxPos, txPos);
+        const nHops   = estimateHopCount(distKm, freqHz);
+        return `<div class="map-popup-row">` +
+          `<span class="map-popup-label" style="color:${colour}">${s.config.label}</span>` +
+          `<span>${(freqHz/1e6).toFixed(2)} MHz · ${distKm.toFixed(0)} km · ${nHops} hop${nHops !== 1 ? 's' : ''}</span>` +
+          `</div>`;
+      }).join('');
+
+      const txTitle = group.length === 1
+        ? `📻 ${group[0].s.config.label}`
+        : `📻 ${group.map(g => g.s.config.label).join(' / ')}`;
+
       const txMarker = L.marker([txPos.lat, txPos.lon], {
-        icon: txIcon(colour),
+        icon: txIcon(markerColour),
         zIndexOffset: 500,
       }).bindPopup(`
         <div class="map-popup">
-          <div class="map-popup-title" style="color:${colour}">📻 ${label}</div>
-          <div class="map-popup-row"><span class="map-popup-label">Frequency</span><span>${(freqHz/1e6).toFixed(2)} MHz</span></div>
-          <div class="map-popup-row"><span class="map-popup-label">Grid</span><span>${s.config.grid}</span></div>
+          <div class="map-popup-title" style="color:${markerColour}">${txTitle}</div>
+          ${freqRows}
+          <div class="map-popup-row"><span class="map-popup-label">Grid</span><span>${txGrid}</span></div>
           <div class="map-popup-row"><span class="map-popup-label">Lat/Lon</span><span>${txPos.lat.toFixed(3)}°, ${txPos.lon.toFixed(3)}°</span></div>
-          <div class="map-popup-row"><span class="map-popup-label">Distance</span><span>${distKm.toFixed(0)} km</span></div>
-          <div class="map-popup-row"><span class="map-popup-label">Est. hops</span><span>${nHops}</span></div>
           <div class="map-popup-row"><span class="map-popup-label">Now</span><span>${txDayNight}</span></div>
           <div class="map-popup-row"><span class="map-popup-label">☀️ Sunrise</span><span>${txSrStr}</span></div>
           <div class="map-popup-row"><span class="map-popup-label">🌙 Sunset</span><span>${txSsStr}</span></div>
         </div>
-      `, { maxWidth: 240 }).addTo(map);
+      `, { maxWidth: 260 }).addTo(map);
 
-      // ── Reflection point markers ──
-      const reflMarkers = reflPts.map(({ lat, lon, hopIndex, totalHops }) => {
-        // Compute sunrise/sunset at this reflection point for today
-        const now = new Date();
-        const times = SunCalc.getTimes(now, lat, lon);
-        const srStr = times.sunrise && isFinite(times.sunrise.getTime())
-          ? times.sunrise.toISOString().slice(11, 16) + ' UTC' : 'N/A';
-        const ssStr = times.sunset && isFinite(times.sunset.getTime())
-          ? times.sunset.toISOString().slice(11, 16) + ' UTC' : 'N/A';
+      // ── One great-circle path + reflection points per station/frequency ──
+      group.forEach(({ s, idx }) => {
+        const label   = s.config.label;
+        const freqHz  = s.config.freq_hz || 10e6;
+        const colour  = colourForIndex(idx);
+        const distKm  = haversineKm(rxPos, txPos);
+        const nHops   = estimateHopCount(distKm, freqHz);
+        const reflPts = hopReflectionPoints(rxPos, txPos, freqHz);
 
-        // Is this point currently in daylight?
-        const sunAlt = SunCalc.getPosition(now, lat, lon).altitude;
-        const isDaytime = sunAlt > 0;
-        const dayNight = isDaytime ? '☀️ Daylight' : '🌙 Night';
-
-        return L.marker([lat, lon], {
-          icon: reflIcon(colour, hopIndex, totalHops),
-          zIndexOffset: 200,
+        const pathPts  = gcPolyline(rxPos, txPos);
+        const pathLine = L.polyline(pathPts, {
+          color:        colour,
+          weight:       2,
+          opacity:      0.75,
+          dashArray:    '6 4',
+          smoothFactor: 1,
         }).bindPopup(`
           <div class="map-popup">
-            <div class="map-popup-title" style="color:${colour}">${label} — hop ${hopIndex}/${totalHops} reflection</div>
-            <div class="map-popup-row"><span class="map-popup-label">Lat/Lon</span><span>${lat.toFixed(2)}°, ${lon.toFixed(2)}°</span></div>
-            <div class="map-popup-row"><span class="map-popup-label">Now</span><span>${dayNight}</span></div>
-            <div class="map-popup-row"><span class="map-popup-label">☀️ Sunrise</span><span>${srStr}</span></div>
-            <div class="map-popup-row"><span class="map-popup-label">🌙 Sunset</span><span>${ssStr}</span></div>
+            <div class="map-popup-title" style="color:${colour}">${label} — propagation path</div>
+            <div class="map-popup-row"><span class="map-popup-label">Distance</span><span>${distKm.toFixed(0)} km</span></div>
+            <div class="map-popup-row"><span class="map-popup-label">Frequency</span><span>${(freqHz/1e6).toFixed(2)} MHz</span></div>
+            <div class="map-popup-row"><span class="map-popup-label">Est. hops</span><span>${nHops}</span></div>
           </div>
-        `, { maxWidth: 240 }).addTo(map);
-      });
+        `, { maxWidth: 220 }).addTo(map);
 
-      stationLayers[label] = { txMarker, pathLine, reflMarkers };
+        const reflMarkers = reflPts.map(({ lat, lon, hopIndex, totalHops }) => {
+          const now   = new Date();
+          const times = SunCalc.getTimes(now, lat, lon);
+          const srStr = times.sunrise && isFinite(times.sunrise.getTime())
+            ? times.sunrise.toISOString().slice(11, 16) + ' UTC' : 'N/A';
+          const ssStr = times.sunset && isFinite(times.sunset.getTime())
+            ? times.sunset.toISOString().slice(11, 16) + ' UTC' : 'N/A';
+          const sunAlt   = SunCalc.getPosition(now, lat, lon).altitude;
+          const dayNight = sunAlt > 0 ? '☀️ Daylight' : '🌙 Night';
+
+          return L.marker([lat, lon], {
+            icon: reflIcon(colour, hopIndex, totalHops),
+            zIndexOffset: 200,
+          }).bindPopup(`
+            <div class="map-popup">
+              <div class="map-popup-title" style="color:${colour}">${label} — hop ${hopIndex}/${totalHops} reflection</div>
+              <div class="map-popup-row"><span class="map-popup-label">Lat/Lon</span><span>${lat.toFixed(2)}°, ${lon.toFixed(2)}°</span></div>
+              <div class="map-popup-row"><span class="map-popup-label">Now</span><span>${dayNight}</span></div>
+              <div class="map-popup-row"><span class="map-popup-label">☀️ Sunrise</span><span>${srStr}</span></div>
+              <div class="map-popup-row"><span class="map-popup-label">🌙 Sunset</span><span>${ssStr}</span></div>
+            </div>
+          `, { maxWidth: 240 }).addTo(map);
+        });
+
+        // Store per-station layers (path + refl); txMarker shared but stored on first.
+        stationLayers[label] = {
+          txMarker:    label === group[0].s.config.label ? txMarker : null,
+          pathLine,
+          reflMarkers,
+        };
+      });
     });
   }
 
