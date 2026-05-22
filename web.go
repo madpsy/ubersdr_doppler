@@ -15,6 +15,7 @@ import (
 	"html/template"
 	"io/fs"
 	"log"
+	"math"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -515,7 +516,11 @@ func startHTTPServer(
 				// Apply manual offset (reference correction is already baked into
 				// each MinuteMean.CorrectedDopplerHz by BaselineMean).
 				mean -= manualOffset
-				meanPtr = &mean
+				// Discard NaN/Inf baseline mean — can occur when history contains
+				// degenerate minute-means from a buggy DSP reading.
+				if !math.IsNaN(mean) && !math.IsInf(mean, 0) {
+					meanPtr = &mean
+				}
 			}
 			cur := sanitiseDopplerReading(ds.CurrentReading())
 			var corrPtr *float64
@@ -526,11 +531,21 @@ func startHTTPServer(
 					corr -= refPPM * float64(ds.cfg.FreqHz) / 1e6
 				}
 				corr -= manualOffset
-				if refValid || manualOffset != 0 {
+				if (refValid || manualOffset != 0) && !math.IsNaN(corr) && !math.IsInf(corr, 0) {
 					corrPtr = &corr
 				}
 			}
 			specBins, peakBin, binBW := ds.LatestSpectrum()
+			// Sanitise spectrum bins — raw FFT output can contain NaN/Inf which
+			// would cause json.Marshal to panic.
+			for i, b := range specBins {
+				if math.IsNaN(float64(b)) || math.IsInf(float64(b), 0) {
+					specBins[i] = 0
+				}
+			}
+			if math.IsNaN(binBW) || math.IsInf(binBW, 0) {
+				binBW = 0
+			}
 			out = append(out, stationStatus{
 				Config:           ds.cfg,
 				Current:          cur,
