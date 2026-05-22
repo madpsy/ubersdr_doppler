@@ -585,13 +585,13 @@ func startHTTPServer(
 				if history == nil {
 					history = []MinuteMean{} // return empty array, not null
 				}
-				jsonResponse(w, smoothMinuteMeans(sanitiseMinuteMeans(history), smoothN))
+				jsonResponse(w, sanitiseMinuteMeans(smoothMinuteMeans(sanitiseMinuteMeans(history), smoothN)))
 			} else {
 				h := ds.History()
 				if h == nil {
 					h = []MinuteMean{}
 				}
-				jsonResponse(w, smoothMinuteMeans(sanitiseMinuteMeans(h), smoothN))
+				jsonResponse(w, sanitiseMinuteMeans(smoothMinuteMeans(sanitiseMinuteMeans(h), smoothN)))
 			}
 			return
 		}
@@ -1151,15 +1151,29 @@ func startHTTPServer(
 }
 
 // jsonResponse writes v as JSON with Content-Type application/json.
-// If encoding fails (e.g. NaN/Inf float values in history data), it logs the
-// error and writes "[]" so the response body is never empty.
+// Uses json.Marshal (buffers to memory before touching w) so that if encoding
+// fails or panics (e.g. NaN/Inf float values trigger a panic in encoding/json),
+// the panic is caught before any bytes reach the ResponseWriter.  This guarantees
+// a 200 OK response always has a non-empty, valid JSON body.
 func jsonResponse(w http.ResponseWriter, v interface{}) {
+	var data []byte
+	var encErr error
+	func() {
+		defer func() {
+			if r := recover(); r != nil {
+				log.Printf("[web] json encode panic (NaN/Inf in data): %v", r)
+				encErr = fmt.Errorf("panic: %v", r)
+			}
+		}()
+		data, encErr = json.Marshal(v)
+	}()
 	w.Header().Set("Content-Type", "application/json")
-	if err := json.NewEncoder(w).Encode(v); err != nil {
-		log.Printf("[web] json encode: %v", err)
-		// Headers already committed — write a safe fallback so the body is never empty.
+	if encErr != nil {
 		_, _ = w.Write([]byte("[]\n"))
+		return
 	}
+	_, _ = w.Write(data)
+	_, _ = w.Write([]byte("\n"))
 }
 
 // ---------------------------------------------------------------------------

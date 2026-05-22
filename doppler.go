@@ -1757,6 +1757,15 @@ func (ds *DopplerStation) aggregateMinute() {
 		}
 	}
 
+	// Discard the minute-mean if the core Doppler value is NaN or Inf — these
+	// values cannot be JSON-encoded and would cause a panic in the HTTP handler.
+	// This can happen if the DSP pipeline produces a degenerate reading (e.g.
+	// all-zero samples, divide-by-zero in frequency estimation).
+	if math.IsNaN(mean.DopplerHz) || math.IsInf(mean.DopplerHz, 0) {
+		log.Printf("[%s] aggregateMinute: discarding NaN/Inf minute-mean (doppler_hz=%v)", ds.cfg.Label, mean.DopplerHz)
+		return
+	}
+
 	ds.mu.Lock()
 	ds.history = append(ds.history, mean)
 	if len(ds.history) > historyDepth {
