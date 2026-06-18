@@ -1521,7 +1521,7 @@ function initCharts() {
       animation: false,
       responsive: true,
       maintainAspectRatio: false,
-      interaction: { mode: 'index', intersect: false },
+      interaction: { mode: 'nearest', axis: 'x', intersect: false },
       layout: { padding: { top: 28 } },
       scales: {
         x: xAxisConfig(false),
@@ -1666,7 +1666,7 @@ function initCharts() {
       animation: false,
       responsive: true,
       maintainAspectRatio: false,
-      interaction: { mode: 'index', intersect: false },
+      interaction: { mode: 'nearest', axis: 'x', intersect: false },
       scales: {
         x: xAxisConfig(false),
         y: {
@@ -1702,7 +1702,7 @@ function initCharts() {
       animation: false,
       responsive: true,
       maintainAspectRatio: false,
-      interaction: { mode: 'index', intersect: false },
+      interaction: { mode: 'nearest', axis: 'x', intersect: false },
       scales: {
         x: xAxisConfig(true),
         y: {
@@ -1737,7 +1737,7 @@ function initCharts() {
       animation: false,
       responsive: true,
       maintainAspectRatio: false,
-      interaction: { mode: 'index', intersect: false },
+      interaction: { mode: 'nearest', axis: 'x', intersect: false },
       scales: {
         x: xAxisConfig(true),
         y: {
