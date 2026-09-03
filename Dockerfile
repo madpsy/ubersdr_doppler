@@ -9,7 +9,7 @@ COPY go.mod go.sum ./
 RUN go mod download
 
 COPY . .
-RUN go build -o /out/ubersdr_doppler ./...
+RUN go build -o /out/ubersdr_doppler .
 
 # ---------------------------------------------------------------------------
 # Stage 2: minimal runtime image

@@ -2,14 +2,16 @@
 //
 // Each DopplerStation opens TWO connections to UberSDR:
 //
-//  1. SPECTRUM connection (mode=spectrum) — receives pre-computed FFT bins from
-//     radiod via the SPEC binary protocol. The carrier appears as a sharp spike
-//     in the spectrum. Peak detection gives sub-Hz Doppler precision with no
-//     demodulation artifacts.
+//  1. SPECTRUM connection — receives pre-computed FFT bins from radiod via the
+//     SPEC binary protocol, version 2 (mode=binary8&version=2; see
+//     spectrum_v2.go). The carrier appears as a sharp spike in the spectrum.
+//     Peak detection gives sub-Hz Doppler precision with no demodulation
+//     artifacts.
 //
-//  2. AUDIO connection (mode=am) — receives demodulated PCM audio. Used only
-//     for the live audio preview feature (streaming WAV to the browser). Not
-//     used for Doppler measurement.
+//  2. AUDIO connections — receive PCM over protocol version 4 (see
+//     pcm_decoder.go): a usb preview stream for the browser's audio player, and
+//     an iq stream for the analysis canvas. Neither is used for the Doppler
+//     measurement itself.
 //
 // The spectrum connection uses 200 bins × 0.5 Hz/bin = 100 Hz window centred
 // on the carrier frequency. Sub-bin frequency estimation uses parabolic
@@ -20,7 +22,6 @@ package main
 import (
 	"bytes"
 	"context"
-	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -36,6 +37,8 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
+
+	"github.com/madpsy/ubersdr_doppler/internal/pcmv4"
 )
 
 // ---------------------------------------------------------------------------
@@ -86,126 +89,6 @@ type MinuteMean struct {
 	SignalDBFS         float32   `json:"signal_dbfs"`
 	NoiseDBFS          float32   `json:"noise_dbfs"`
 	Count              int       `json:"count"` // number of valid samples averaged
-}
-
-// ---------------------------------------------------------------------------
-// SPEC binary protocol constants
-// ---------------------------------------------------------------------------
-
-const (
-	specMagic0 = 0x53 // 'S'
-	specMagic1 = 0x50 // 'P'
-	specMagic2 = 0x45 // 'E'
-	specMagic3 = 0x43 // 'C'
-
-	specHeaderSize = 22
-
-	specFlagFullFloat32  = 0x01 // full frame, float32 bins
-	specFlagDeltaFloat32 = 0x02 // delta frame, float32 changes
-	specFlagFullUint8    = 0x03 // full frame, uint8 bins
-	specFlagDeltaUint8   = 0x04 // delta frame, uint8 changes
-)
-
-// ---------------------------------------------------------------------------
-// spectrumDecoder — maintains state for SPEC binary protocol decoding
-// ---------------------------------------------------------------------------
-
-type spectrumDecoder struct {
-	bins []float32 // current full spectrum (updated by full and delta frames)
-}
-
-func newSpectrumDecoder(binCount int) *spectrumDecoder {
-	return &spectrumDecoder{bins: make([]float32, binCount)}
-}
-
-// decode parses a SPEC binary frame and updates the internal bin state.
-// Returns the updated bins slice (same backing array) and true on success.
-func (d *spectrumDecoder) decode(data []byte) ([]float32, bool) {
-	if len(data) < specHeaderSize {
-		return nil, false
-	}
-	// Validate magic
-	if data[0] != specMagic0 || data[1] != specMagic1 ||
-		data[2] != specMagic2 || data[3] != specMagic3 {
-		return nil, false
-	}
-	// version := data[4]  // currently 0x01
-	flags := data[5]
-	// timestamp := binary.LittleEndian.Uint64(data[6:14])  // ms
-	// frequency := binary.LittleEndian.Uint64(data[14:22]) // Hz
-
-	payload := data[specHeaderSize:]
-
-	switch flags {
-	case specFlagFullFloat32:
-		// Full frame: payload is binCount × float32 (little-endian)
-		n := len(payload) / 4
-		if n == 0 {
-			return nil, false
-		}
-		if len(d.bins) != n {
-			d.bins = make([]float32, n)
-		}
-		for i := 0; i < n; i++ {
-			bits := binary.LittleEndian.Uint32(payload[i*4 : i*4+4])
-			d.bins[i] = math.Float32frombits(bits)
-		}
-
-	case specFlagDeltaFloat32:
-		// Delta frame: uint16 changeCount + [uint16 index, float32 value] pairs
-		if len(payload) < 2 {
-			return nil, false
-		}
-		changeCount := int(binary.LittleEndian.Uint16(payload[0:2]))
-		payload = payload[2:]
-		if len(payload) < changeCount*6 {
-			return nil, false
-		}
-		for i := 0; i < changeCount; i++ {
-			idx := int(binary.LittleEndian.Uint16(payload[i*6 : i*6+2]))
-			bits := binary.LittleEndian.Uint32(payload[i*6+2 : i*6+6])
-			if idx < len(d.bins) {
-				d.bins[idx] = math.Float32frombits(bits)
-			}
-		}
-
-	case specFlagFullUint8:
-		// Full frame: payload is binCount × uint8
-		// uint8 encoding: 0 = -256 dBFS, 255 = -1 dBFS → dBFS = uint8 - 256
-		n := len(payload)
-		if n == 0 {
-			return nil, false
-		}
-		if len(d.bins) != n {
-			d.bins = make([]float32, n)
-		}
-		for i := 0; i < n; i++ {
-			d.bins[i] = float32(int(payload[i]) - 256)
-		}
-
-	case specFlagDeltaUint8:
-		// Delta frame: uint16 changeCount + [uint16 index, uint8 value] pairs
-		if len(payload) < 2 {
-			return nil, false
-		}
-		changeCount := int(binary.LittleEndian.Uint16(payload[0:2]))
-		payload = payload[2:]
-		if len(payload) < changeCount*3 {
-			return nil, false
-		}
-		for i := 0; i < changeCount; i++ {
-			idx := int(binary.LittleEndian.Uint16(payload[i*3 : i*3+2]))
-			val := float32(int(payload[i*3+2]) - 256)
-			if idx < len(d.bins) {
-				d.bins[idx] = val
-			}
-		}
-
-	default:
-		return nil, false
-	}
-
-	return d.bins, true
 }
 
 // ---------------------------------------------------------------------------
@@ -579,9 +462,9 @@ func httpBaseURL(rawURL string) string {
 }
 
 // spectrumWSURL builds the WebSocket URL for the /ws/user-spectrum endpoint.
-// The server only accepts user_session_id as a query parameter; all other
-// spectrum parameters (frequency, bin_count, bin_bandwidth) are sent as JSON
-// messages after the connection is established.
+// Beyond the session id and the protocol selection, the spectrum parameters
+// (frequency, bin_count, bin_bandwidth) are sent as JSON messages after the
+// connection is established.
 func (ds *DopplerStation) spectrumWSURL(sessionID string) string {
 	u, _ := url.Parse(ds.ubersdrURL)
 	wsScheme := "ws"
@@ -592,7 +475,48 @@ func (ds *DopplerStation) spectrumWSURL(sessionID string) string {
 	host := u.Host
 	q := url.Values{}
 	q.Set("user_session_id", sessionID)
+	// binary8 and version 2 travel together: the server defines version 2 only
+	// for the 8-bit path, so asking for one without the other silently yields
+	// version 1 float32 frames. This client reads version 2 and nothing else.
+	q.Set("mode", "binary8")
+	q.Set("version", fmt.Sprintf("%d", specProtocolVersion))
 	return fmt.Sprintf("%s://%s/ws/user-spectrum?%s", wsScheme, host, q.Encode())
+}
+
+// audioStreamParams is the format and protocol selection both audio sockets
+// share. "pcm-zstd" is the name of the lossless stream; version 4 replaced its
+// zstd wrapper with the predictive codec but kept the name, so the format and
+// the version are separate choices and only the version says what arrives.
+//
+// The server refuses a version it cannot serve, so this fails loudly against a
+// server too old rather than silently decoding the wrong shape -- except for
+// servers before 0.1.63, which clamp instead; pcmDecoder.decode recognises the
+// zstd frame those send and says so.
+func audioStreamParams() url.Values {
+	q := url.Values{}
+	q.Set("format", "pcm-zstd")
+	q.Set("version", fmt.Sprintf("%d", pcmv4.ProtocolVersion))
+	return q
+}
+
+// audioPreviewParams is the USB preview stream: dial 1 kHz below the carrier so
+// the carrier tone appears at 1000 Hz in the audio passband (standard
+// practice), with a 300-1500 Hz filter centred on that tone. The dial offset
+// itself is applied by the caller.
+func audioPreviewParams() url.Values {
+	q := audioStreamParams()
+	q.Set("bandwidthLow", "300")
+	q.Set("bandwidthHigh", "1500")
+	return q
+}
+
+// iqStreamParams is the IQ stream: tuned directly to the carrier with no dial
+// offset, bandwidthLow=-6000 / bandwidthHigh=6000 for a 12 kHz capture window.
+func iqStreamParams() url.Values {
+	q := audioStreamParams()
+	q.Set("bandwidthLow", "-6000")
+	q.Set("bandwidthHigh", "6000")
+	return q
 }
 
 // audioWSURL builds the WebSocket URL for the /ws audio endpoint.
@@ -755,6 +679,12 @@ func (ds *DopplerStation) runSpectrumLoop(ctx context.Context) {
 			wsConn = conn
 			wsConnMu.Unlock()
 
+			// The decoder holds the codes the previous connection's frames left
+			// it holding, and a delta on the new socket would be applied to
+			// them. Every session starts with a full frame, so discarding the
+			// state costs nothing and reusing it would silently mix streams.
+			dec.reset()
+
 			log.Printf("[%s] spectrum connected", ds.cfg.Label)
 
 			// Send zoom/pan config to request our desired window:
@@ -792,9 +722,21 @@ func (ds *DopplerStation) runSpectrumLoop(ctx context.Context) {
 				}
 			}()
 
-			// Read loop — the server sends:
-			//   • text JSON frames: "config" (session params), "pong", "error" — skip these
-			//   • binary SPEC frames: spectrum data — decode with dec.decode()
+			// Read loop. Everything this endpoint sends arrives as a BINARY
+			// frame, and there are two kinds:
+			//
+			//   * "SPEC" frames -- the spectrum itself, for dec.decode().
+			//   * gzip-compressed JSON -- every control message. sendStatus
+			//     ("config"), sendMessage ("pong") and sendError all go through
+			//     wsConn.writeJSONCompressed on the server, which gzips the JSON
+			//     and writes it as a BINARY message.
+			//
+			// That second kind is why this demultiplexes on the magic rather than
+			// on the WebSocket message type. Looking for control messages only in
+			// text frames finds none of them, and "config" is what carries the
+			// binBandwidth the server actually chose -- the number that converts
+			// bins to Hz. A text frame is still handled, in case a server sends
+			// one.
 			for {
 				if ctx.Err() != nil {
 					localCancel()
@@ -808,25 +750,32 @@ func (ds *DopplerStation) runSpectrumLoop(ctx context.Context) {
 					log.Printf("[%s] spectrum: read error: %v — reconnecting", ds.cfg.Label, err)
 					break
 				}
-				// Text (JSON) control messages from the server.
-				// Parse "config" to learn the actual binBandwidth the server is using.
-				if msgType != websocket.BinaryMessage {
-					if msgType == websocket.TextMessage {
-						var cfg struct {
-							Type         string  `json:"type"`
-							BinBandwidth float64 `json:"binBandwidth"`
-						}
-						if err2 := json.Unmarshal(msg, &cfg); err2 == nil &&
-							cfg.Type == "config" && cfg.BinBandwidth > 0 {
-							specMu.Lock()
-							actualBinBW = cfg.BinBandwidth
-							specMu.Unlock()
-							log.Printf("[%s] spectrum: server binBandwidth=%.2f Hz", ds.cfg.Label, cfg.BinBandwidth)
+				if msgType != websocket.BinaryMessage && msgType != websocket.TextMessage {
+					continue
+				}
+				if !isSpectrumFrame(msg) {
+					// A control message: gzip-compressed JSON on a binary frame,
+					// or plain JSON on a text one.
+					if bw, ok := parseBinBandwidth(msg); ok {
+						specMu.Lock()
+						changed := actualBinBW != bw
+						actualBinBW = bw
+						specMu.Unlock()
+						if changed {
+							log.Printf("[%s] spectrum: server binBandwidth=%.4f Hz", ds.cfg.Label, bw)
 						}
 					}
 					continue
 				}
-				bins, ok := dec.decode(msg)
+				bins, ok, derr := dec.decode(msg)
+				if derr != nil {
+					// A malformed frame is worth saying: the alternative is a
+					// spectrum that quietly stops updating. A delta we cannot use
+					// yet is not an error and arrives here as ok=false with no
+					// message.
+					log.Printf("[%s] spectrum: %v", ds.cfg.Label, derr)
+					continue
+				}
 				if !ok {
 					continue
 				}
@@ -1038,12 +987,11 @@ func (ds *DopplerStation) runSpectrumLoop(ctx context.Context) {
 // Only maintains the connection when there are active preview listeners.
 // Disconnects immediately when the last listener unsubscribes (via audioHub.drained()).
 func (ds *DopplerStation) runAudioLoop(ctx context.Context) {
-	dec, err := newPCMDecoder()
-	if err != nil {
-		log.Printf("[%s] audio: decoder init failed: %v", ds.cfg.Label, err)
-		return
-	}
-	defer dec.close()
+	// One decoder for this loop, reset for each connection. The version 4
+	// predictor adapts from the samples already coded, so its state belongs to
+	// exactly one socket -- carrying it across a reconnect would decode the new
+	// stream's first packets against the old stream's filter taps.
+	dec := newPCMDecoder()
 
 	for {
 		if ctx.Err() != nil {
@@ -1084,14 +1032,7 @@ func (ds *DopplerStation) runAudioLoop(ctx context.Context) {
 			continue
 		}
 
-		audioParams := url.Values{}
-		audioParams.Set("format", "pcm-zstd")
-		audioParams.Set("version", "2")
-		// USB mode with dial 1 kHz below the carrier so the carrier tone
-		// appears at 1000 Hz in the audio passband (standard practice).
-		// Filter: 300–1500 Hz passband centred on the 1 kHz tone.
-		audioParams.Set("bandwidthLow", "300")
-		audioParams.Set("bandwidthHigh", "1500")
+		audioParams := audioPreviewParams()
 		// Dial frequency = carrier - 1000 Hz
 		dialFreq := ds.cfg.FreqHz - 1000
 		wsAddr := ds.audioWSURL("usb", audioParams, sessionID, dialFreq)
@@ -1107,6 +1048,9 @@ func (ds *DopplerStation) runAudioLoop(ctx context.Context) {
 			}
 			continue
 		}
+
+		// New socket, new predictor state.
+		dec.reset()
 
 		log.Printf("[%s] audio preview connected", ds.cfg.Label)
 
@@ -1171,11 +1115,22 @@ func (ds *DopplerStation) runAudioLoop(ctx context.Context) {
 				if res.msgType != websocket.BinaryMessage {
 					continue
 				}
-				pkt, err := dec.decode(res.msg, true)
-				if err != nil || len(pkt.pcm) == 0 {
+				// Every binary frame goes to the decoder, in arrival order,
+				// even when its samples are then discarded: the predictor is
+				// backward adaptive, so skipping one turns everything after it
+				// into plausible noise rather than into an error.
+				pkt, err := dec.decode(res.msg)
+				if err != nil {
+					log.Printf("[%s] audio preview: %v — reconnecting", ds.cfg.Label, err)
+					connCancel()
+					conn.Close()
+					break readLoop
+				}
+				if len(pkt.pcm) == 0 {
 					continue
 				}
-				// Update sample rate from full-header packets
+				// Sample rate is carried forward by the header decoder, so it
+				// is present on every packet, not only resynchronisation ones.
 				if pkt.sampleRate > 0 {
 					ds.streamMu.Lock()
 					ds.streamSampleRate = pkt.sampleRate
@@ -1201,12 +1156,9 @@ func (ds *DopplerStation) runAudioLoop(ctx context.Context) {
 // IQ mode delivers interleaved S16LE I/Q pairs at the station's carrier frequency,
 // with a ±6 kHz bandwidth (12 kHz total), giving a 12 kHz-wide IQ capture window.
 func (ds *DopplerStation) runIQLoop(ctx context.Context) {
-	dec, err := newPCMDecoder()
-	if err != nil {
-		log.Printf("[%s] iq: decoder init failed: %v", ds.cfg.Label, err)
-		return
-	}
-	defer dec.close()
+	// As in runAudioLoop: one decoder for this loop, reset per connection.
+	// IQ arrives as two interleaved channels through the same codec.
+	dec := newPCMDecoder()
 
 	for {
 		if ctx.Err() != nil {
@@ -1244,13 +1196,7 @@ func (ds *DopplerStation) runIQLoop(ctx context.Context) {
 			continue
 		}
 
-		// IQ mode: tuned directly to the carrier frequency (no dial offset).
-		// bandwidthLow=-6000 / bandwidthHigh=6000 → 12 kHz capture window.
-		iqParams := url.Values{}
-		iqParams.Set("format", "pcm-zstd")
-		iqParams.Set("version", "2")
-		iqParams.Set("bandwidthLow", "-6000")
-		iqParams.Set("bandwidthHigh", "6000")
+		iqParams := iqStreamParams()
 		// Pass 0 for dialFreqHz so audioWSURL uses the station's nominal carrier.
 		wsAddr := ds.audioWSURL("iq", iqParams, sessionID, 0)
 
@@ -1265,6 +1211,9 @@ func (ds *DopplerStation) runIQLoop(ctx context.Context) {
 			}
 			continue
 		}
+
+		// New socket, new predictor state.
+		dec.reset()
 
 		log.Printf("[%s] iq stream connected", ds.cfg.Label)
 
@@ -1324,11 +1273,20 @@ func (ds *DopplerStation) runIQLoop(ctx context.Context) {
 				if res.msgType != websocket.BinaryMessage {
 					continue
 				}
-				pkt, err := dec.decode(res.msg, true)
-				if err != nil || len(pkt.pcm) == 0 {
+				// Every binary frame reaches the decoder in order; see the
+				// note in runAudioLoop.
+				pkt, err := dec.decode(res.msg)
+				if err != nil {
+					log.Printf("[%s] iq stream: %v — reconnecting", ds.cfg.Label, err)
+					connCancel()
+					conn.Close() //nolint:errcheck
+					break readLoop
+				}
+				if len(pkt.pcm) == 0 {
 					continue
 				}
-				// Update IQ sample rate from full-header packets (channels=2 for IQ).
+				// IQ arrives as interleaved pairs, so channels is 2 and the
+				// rate below is the pair rate.
 				if pkt.sampleRate > 0 {
 					ds.streamMu.Lock()
 					ds.iqSampleRate = pkt.sampleRate
