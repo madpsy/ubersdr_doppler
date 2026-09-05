@@ -29,7 +29,11 @@ import (
 // carrying no body, an escape to verbatim samples on incompressible noise, a
 // sample-rate change, and interleaved I/Q -- so it exercises both of the
 // sockets this program opens, the usb preview and the iq stream.
-const pcmv4ExpectedSHA = "ba368c898ae406c5acc806653d9f2dbbfa40086eca3707fda5d77c13948f78d1"
+const pcmv4ExpectedSHA = "4875d2185f1ff5a2031386c569cac0c2259e6a827b9e61f813399a19c3b9c903"
+
+// testdata/pcmv4_scaled.bin is the same for the reduced-depth IQ profile, and
+// the hash is the server's own, from ka9q_ubersdr/clients/rtl_sdr/pcmv4_test.go.
+const pcmv4ScaledSHA = "7315366ceed3e70552c28d31cde690a14dc66f5244b5a8dc34a5e696f5698ccc"
 
 // testdata/pcmv4_rice_edge.bin covers what a recording of ordinary traffic will
 // not: a Rice codeword whose unary run is exactly 63 bits long, counted out of
@@ -40,7 +44,7 @@ const pcmv4ExpectedSHA = "ba368c898ae406c5acc806653d9f2dbbfa40086eca3707fda5d77c
 // The hash is the server's own, from
 // ka9q_ubersdr/clients/soapy_driver/test/run.sh, not a value derived from any
 // decoder.
-const pcmv4RiceEdgeSHA = "83e3d94b509efbf7a212a3e10193b3eb281fe1460cbfeef6aabe474c92a718c7"
+const pcmv4RiceEdgeSHA = "3413109ff6d06d44fb8fa44c84595b776f5570f05663b762830853ddc0183527"
 
 // readV4Fixture returns the packets in a fixture file.
 //
@@ -86,7 +90,7 @@ func TestPCMv4DecodesServerStream(t *testing.T) {
 	// decoder that lost the carried-forward metadata could still hash correctly
 	// while mislabelling the stream, and the rate is what the WAV headers this
 	// program serves to the browser are built from.
-	wantParams := [][2]int{{12000, 1}, {24000, 1}, {48000, 2}}
+	wantParams := [][2]int{{12000, 1}, {24000, 1}, {384000, 2}}
 	var gotParams [][2]int
 
 	mono, iq := 0, 0
@@ -132,6 +136,32 @@ func TestPCMv4DecodesServerStream(t *testing.T) {
 	// Both sockets this program opens are covered by the one fixture.
 	if mono == 0 || iq == 0 {
 		t.Fatalf("fixture exercised %d mono and %d I/Q packets; both paths must be covered", mono, iq)
+	}
+}
+
+// testdata/pcmv4_scaled.bin is the reduced-depth IQ the iq socket asks for with
+// min_margin: profile 2, where a shift byte leads the body and the decoded
+// samples are shifted back left by it on the way out. The fixture crosses
+// between profile 2 and plain profile 0 part way through, as a margin change on
+// a live socket does.
+//
+// A shift read wrongly does not fail; it delivers I/Q several bits too quiet,
+// which the phase measurement would report as a station that had faded.
+func TestPCMv4DecodesScaledStream(t *testing.T) {
+	dec := newPCMDecoder()
+	h := sha256.New()
+	for i, pkt := range readV4Fixture(t, "pcmv4_scaled.bin") {
+		p, err := dec.decode(pkt)
+		if err != nil {
+			t.Fatalf("packet %d: %v", i, err)
+		}
+		if p.channels != 2 || len(p.pcm)%4 != 0 {
+			t.Fatalf("packet %d: %d bytes over %d channels is not whole I/Q pairs", i, len(p.pcm), p.channels)
+		}
+		h.Write(p.pcm)
+	}
+	if got := hex.EncodeToString(h.Sum(nil)); got != pcmv4ScaledSHA {
+		t.Fatalf("scaled stream decoded wrongly\n got %s\nwant %s", got, pcmv4ScaledSHA)
 	}
 }
 

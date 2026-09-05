@@ -19,6 +19,11 @@ services:
       #
       # Web UI port (default: 6096)
       # WEB_PORT: "6096"
+      #
+      # Reduced-depth IQ: how far below the band's own noise floor the
+      # quantisation floor is held, in dB. 0 is lossless and costs about twice
+      # the bandwidth; 26 is the measured transparent setting (default: 26).
+      # UBERSDR_MIN_MARGIN: "26"
     networks:
       - sdr-network
     volumes:

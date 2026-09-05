@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"net/url"
 	"testing"
 )
@@ -100,5 +101,30 @@ func TestAudioURLsRequestVersion4(t *testing.T) {
 	if iq.Get("bandwidthLow") != "-6000" || iq.Get("bandwidthHigh") != "6000" {
 		t.Errorf("iq window = %q..%q, want -6000..6000",
 			iq.Get("bandwidthLow"), iq.Get("bandwidthHigh"))
+	}
+
+	// The reduced-depth request has to be on the URL: the server's own default
+	// is lossless, so a socket that does not ask silently costs about twice the
+	// bandwidth for I/Q whose extra depth sits below the band noise.
+	if got := iq.Get("min_margin"); got != fmt.Sprintf("%d", minMarginDefaultDB) {
+		t.Errorf("iq min_margin = %q, want %d", got, minMarginDefaultDB)
+	}
+	// And not on the demodulated socket, where the server ignores it anyway.
+	if got := preview.Get("min_margin"); got != "" {
+		t.Errorf("audio preview min_margin = %q, want it absent", got)
+	}
+}
+
+// Lossless is asked for by omitting the parameter, not by sending a zero: a
+// server older than 0.1.64 ignores min_margin entirely, so omission is the only
+// form that means the same thing to both.
+func TestIQURLOmitsMinMarginWhenLossless(t *testing.T) {
+	saved := iqMinMarginDB
+	iqMinMarginDB = 0
+	defer func() { iqMinMarginDB = saved }()
+
+	iq := queryOf(t, testStation().audioWSURL("iq", iqStreamParams(), "s", 0))
+	if _, ok := iq["min_margin"]; ok {
+		t.Errorf("min_margin = %q, want it absent when lossless", iq.Get("min_margin"))
 	}
 }

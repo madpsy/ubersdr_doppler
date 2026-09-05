@@ -510,12 +510,37 @@ func audioPreviewParams() url.Values {
 	return q
 }
 
+// Reduced-depth IQ. min_margin asks the server to requantise each IQ packet to
+// whatever depth holds the quantisation floor this many dB below the band's own
+// noise floor, which costs roughly half the bytes of the lossless stream. The
+// server's own default is lossless, so a client that does not ask pays for
+// bit-exact I/Q it has no use for: the carrier measurement here is noise
+// limited, and 26 dB is the setting measured to be transparent.
+//
+// 0 means lossless. Anything else is whole dB in 15-60; the server clamps
+// silently outside that, so main rejects it instead and says so.
+const (
+	minMarginDefaultDB = 26
+	minMarginMinDB     = 15
+	minMarginMaxDB     = 60
+)
+
+// iqMinMarginDB is what the iq socket asks for, set once from -min-margin.
+var iqMinMarginDB = minMarginDefaultDB
+
 // iqStreamParams is the IQ stream: tuned directly to the carrier with no dial
 // offset, bandwidthLow=-6000 / bandwidthHigh=6000 for a 12 kHz capture window.
+//
+// The margin is omitted rather than sent as 0 when lossless is wanted, so the
+// request means the same thing to a server too old to know the parameter --
+// which ignores it -- as to one that honours it.
 func iqStreamParams() url.Values {
 	q := audioStreamParams()
 	q.Set("bandwidthLow", "-6000")
 	q.Set("bandwidthHigh", "6000")
+	if iqMinMarginDB > 0 {
+		q.Set("min_margin", fmt.Sprintf("%d", iqMinMarginDB))
+	}
 	return q
 }
 
@@ -1039,8 +1064,19 @@ func (ds *DopplerStation) runAudioLoop(ctx context.Context) {
 
 		hdr := http.Header{}
 		hdr.Set("User-Agent", "ubersdr_doppler/1.0")
-		conn, _, err := wsDialer.Dial(wsAddr, hdr)
+		conn, resp, err := wsDialer.Dial(wsAddr, hdr)
 		if err != nil {
+			// A server refuses a protocol version it cannot serve with an
+			// HTTP 400 before the upgrade, so a version mismatch shows up
+			// here rather than as a stream that never decodes. Say which,
+			// or a receiver that will never connect looks like one that is
+			// merely down.
+			if resp != nil {
+				log.Printf("[%s] audio preview: dial failed: %v (HTTP %d) — retrying in 10s", ds.cfg.Label, err, resp.StatusCode)
+				resp.Body.Close() //nolint:errcheck
+			} else {
+				log.Printf("[%s] audio preview: dial failed: %v — retrying in 10s", ds.cfg.Label, err)
+			}
 			select {
 			case <-ctx.Done():
 				return
@@ -1202,8 +1238,19 @@ func (ds *DopplerStation) runIQLoop(ctx context.Context) {
 
 		hdr := http.Header{}
 		hdr.Set("User-Agent", "ubersdr_doppler/1.0")
-		conn, _, err := wsDialer.Dial(wsAddr, hdr)
+		conn, resp, err := wsDialer.Dial(wsAddr, hdr)
 		if err != nil {
+			// A server refuses a protocol version it cannot serve with an
+			// HTTP 400 before the upgrade, so a version mismatch shows up
+			// here rather than as a stream that never decodes. Say which,
+			// or a receiver that will never connect looks like one that is
+			// merely down.
+			if resp != nil {
+				log.Printf("[%s] iq stream: dial failed: %v (HTTP %d) — retrying in 10s", ds.cfg.Label, err, resp.StatusCode)
+				resp.Body.Close() //nolint:errcheck
+			} else {
+				log.Printf("[%s] iq stream: dial failed: %v — retrying in 10s", ds.cfg.Label, err)
+			}
 			select {
 			case <-ctx.Done():
 				return

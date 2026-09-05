@@ -48,12 +48,23 @@ func envFloat64Or(key string, def float64) float64 {
 	return def
 }
 
+func envIntOr(key string, def int) int {
+	if v := os.Getenv(key); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			return n
+		}
+	}
+	return def
+}
+
 func main() {
 	var (
 		ubersdrURL = flag.String("url", envOr("UBERSDR_URL", "ws://ubersdr:8080/ws"), "UberSDR WebSocket URL (env: UBERSDR_URL)")
 		dataDir    = flag.String("data", envOr("DOPPLER_DATA_DIR", "/data"), "Data directory for stations.json, settings.json and CSV logs (env: DOPPLER_DATA_DIR)")
 		listenAddr = flag.String("listen", ":"+envOr("WEB_PORT", "6096"), "HTTP listen address (env: WEB_PORT)")
 		uiPassword = flag.String("ui-password", envOr("UI_PASSWORD", ""), "Password required for write actions in the web UI (env: UI_PASSWORD; empty = write actions disabled)")
+		minMargin  = flag.Int("min-margin", envIntOr("UBERSDR_MIN_MARGIN", minMarginDefaultDB),
+			fmt.Sprintf("Reduced-depth IQ margin in dB below the noise floor (env: UBERSDR_MIN_MARGIN; 0 = lossless, otherwise %d-%d)", minMarginMinDB, minMarginMaxDB))
 	)
 	flag.Parse()
 
@@ -62,6 +73,16 @@ func main() {
 		flag.Usage()
 		os.Exit(1)
 	}
+
+	// Refused rather than clamped: the server clamps an out-of-range margin
+	// without saying so, and a margin nobody was told about is one nobody can
+	// account for in the readings it produced.
+	if *minMargin != 0 && (*minMargin < minMarginMinDB || *minMargin > minMarginMaxDB) {
+		fmt.Fprintf(os.Stderr, "error: -min-margin %d is out of range: 0 for lossless, otherwise %d-%d dB\n",
+			*minMargin, minMarginMinDB, minMarginMaxDB)
+		os.Exit(1)
+	}
+	iqMinMarginDB = *minMargin
 
 	// Ensure data directory exists
 	if err := os.MkdirAll(*dataDir, 0o755); err != nil {
@@ -72,6 +93,11 @@ func main() {
 	log.Printf("[main] UberSDR URL : %s", *ubersdrURL)
 	log.Printf("[main] Data dir    : %s", *dataDir)
 	log.Printf("[main] Listen addr : %s", *listenAddr)
+	if iqMinMarginDB > 0 {
+		log.Printf("[main] IQ margin   : %d dB below the noise floor (reduced depth)", iqMinMarginDB)
+	} else {
+		log.Printf("[main] IQ margin   : lossless")
+	}
 
 	// Load global settings (frequency reference type, calibration offsets, etc.)
 	settingsPath := *dataDir + "/settings.json"

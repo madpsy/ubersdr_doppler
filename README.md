@@ -235,6 +235,7 @@ The three propagation metric fields are **omitted** (not `null`) until the rolli
 | `UBERSDR_URL` | `ws://ubersdr:8080/ws` | UberSDR WebSocket URL |
 | `DOPPLER_DATA_DIR` | `/data` | Data directory for `stations.json`, `settings.json` and CSV logs |
 | `WEB_PORT` | `6096` | Web UI port |
+| `UBERSDR_MIN_MARGIN` | `26` | Reduced-depth IQ margin in dB below the band noise floor (`0` = lossless, otherwise 15-60). Needs UberSDR 0.1.64 or later; an older server ignores it and sends the lossless stream, which just costs more bandwidth |
 
 ---
 
