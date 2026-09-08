@@ -523,10 +523,11 @@ window.DopplerMap = (() => {
       zoomControl: true,
     });
 
-    // CartoDB Dark Matter — matches the dark UI theme
-    L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
-      attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors &copy; <a href="https://carto.com/attributions">CARTO</a>',
-      subdomains: 'abcd',
+    // OSM's standard tiles, darkened by the CSS filter on #doppler-map rather
+    // than fetched from a dark tile source: CARTO's basemaps now want an API
+    // key, and the filter is what every other UberSDR map already uses.
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+      attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors',
       maxZoom: 19,
     }).addTo(map);
 

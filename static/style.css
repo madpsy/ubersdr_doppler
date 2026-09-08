@@ -399,6 +399,16 @@ tr.row-stale td  { background: rgba(210,153,34,0.08); }
   background: #0a0e1a;
 }
 
+/* OSM serves one set of tiles and they are a light map, so this filter is what
+   makes them sit in a dark interface rather than a second tile source being
+   fetched. The same declaration every other UberSDR map uses — a recipe
+   rather than a calculation, and a map that looked nearly like the others would
+   be worse than one that looked nothing like them. Scoped to the tiles so the
+   markers, terminator and popups drawn over them keep their own colours. */
+#doppler-map .leaflet-tile {
+  filter: brightness(0.7) invert(1) contrast(3) hue-rotate(200deg) saturate(0.3) brightness(0.7);
+}
+
 /* Leaflet popup — dark theme */
 .leaflet-popup-content-wrapper {
   background: var(--surface);
